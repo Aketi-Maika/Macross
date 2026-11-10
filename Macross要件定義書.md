@@ -68,6 +68,7 @@ Made in Aketimaika Communication Radio with On-demand Speech Services（略称: 
   - 形式: `yyyy-mm-dd_HHMM`（例: `2026-11-11_1430`。JST、`HHMM` は録音開始の時分）
   - ファイル名（案）: `<チャンネル>/yyyy-mm-dd_HHMM_<ID>.mp3`
     - 同じ分に同じ人が複数回押した場合は末尾に連番を付ける（例: `_2`）（案）
+- 保存先は初期構成で File Browser（OSS）により公開し、ブラウザから閲覧・再生・ダウンロードできるようにする（admin のみ）
 - 録音の保持期間は **3ヶ月** とし、期限を過ぎた録音は自動削除する
   - 容量の目安（案）: 64kbps の MP3 で約 29MB/時間。ストレージ 64GB のうち約 40GB を録音に充てると、約 1,400 時間分
 
@@ -207,6 +208,7 @@ flowchart LR
 - [WebRTC](https://webrtc.org/)
 - 監視: [Zabbix](https://www.zabbix.com/jp) / [Grafana](https://grafana.com/ja/) / [Prometheus](https://prometheus.io/) / [Loki](https://grafana.com/ja/oss/loki/)
 - TTS: [Open JTalk](https://open-jtalk.sourceforge.net/)
+- 録音ブラウザ: [File Browser](https://filebrowser.org/)
 - （案）MCU: [Janus Gateway](https://janus.conf.meetecho.com/) の AudioBridge プラグイン（音声ミックス・録音に対応）、または webrtc-rs による自作
 - （任意）[Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/)
 
