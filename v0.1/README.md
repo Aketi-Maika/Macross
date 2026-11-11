@@ -40,49 +40,208 @@ flowchart LR
 |---|---|
 | `server/` | Rust サーバ（認証・ID 管理・PTT 制御・Janus へのシグナリング中継・録音変換） |
 | `web/` | Vue 3 フロントエンド |
-| `janus/` | Janus コンテナ。起動時に `Macross.yaml` から Janus 設定を生成 |
-| `caddy/` | HTTPS 終端（Let's Encrypt）。`/files/`・`/grafana/` は Macross の admin ログインを確認してから中継 |
+| `config/` | 起動時に `Macross.yaml` から Janus・Caddy・Grafana の設定を生成するコンテナ |
+| `janus/` | Janus コンテナ |
+| （Caddy） | HTTPS 終端（Let's Encrypt）。`/files/`・`/grafana/` は Macross の admin ログインを確認してから中継。設定は `config/` が生成 |
 | `monitoring/` | Prometheus の収集設定、Grafana のデータソースとダッシュボード（自動で読み込まれる） |
 | `Macross.yaml` | サーバ設定（本番） |
 
 ## サーバへの導入（Rocky Linux 9）
 
-```bash
-# 1. Docker
-sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
-sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-sudo systemctl enable --now docker
+以下、ドメインを `macross.build-maika.jp` とした例。別のドメインを使う場合は読み替えること。
 
-# 2. ファイアウォール（HTTPS と WebRTC 用 UDP）
+### 1. サーバのグローバル IP を調べる
+
+```bash
+curl -4 -s https://ifconfig.me ; echo
+```
+
+表示された IP（例 `203.0.113.10`）を以降の手順で使う。
+
+> 自宅回線などで IP が変わる場合は、固定 IP の契約か DDNS が必要。IP が変わると DNS と `Macross.yaml` の `janus.public_ip` の両方を直すことになる。
+
+### 2. ドメインの設定（DNS）
+
+ドメインの管理画面で、サブドメインをサーバの IP に向ける **A レコード** を追加する。
+
+**Cloudflare でドメインを管理している場合**
+
+1. Cloudflare ダッシュボード → 対象ドメイン（`build-maika.jp`）→ **DNS** → **Records** → **Add record**
+2. 次のように入力して **Save**
+
+   | 項目 | 値 |
+   |---|---|
+   | Type | `A` |
+   | Name | `macross` |
+   | IPv4 address | 手順1の IP |
+   | Proxy status | **DNS only**（灰色の雲。オレンジの雲＝Proxied にしない） |
+   | TTL | Auto |
+
+   Proxied にすると HTTPS の証明書を Caddy が取得できなかったり、Cloudflare の SSL 設定次第でリダイレクトが繰り返されたりするため、DNS only にする。
+
+**その他のレジストラ（お名前.com など）の場合**
+
+DNS レコード設定画面で、ホスト名 `macross`、種別 `A`、値に手順1の IP を登録する。
+
+**反映の確認**（数分〜1時間ほどかかることがある）
+
+```bash
+sudo dnf install -y bind-utils
+dig +short macross.build-maika.jp
+# → 手順1の IP が表示されれば OK
+```
+
+### 3. ポートを開ける
+
+自宅や社内のルータ配下にサーバがある場合は、ルータで次のポートをサーバへ転送（ポートフォワード）する。クラウドの場合はセキュリティグループで許可する。
+
+| ポート | 用途 |
+|---|---|
+| TCP 80 | 証明書の取得（Let's Encrypt）、HTTPS へのリダイレクト |
+| TCP 443 | Web 画面・WebSocket |
+| UDP 20000-20200 | 音声（WebRTC） |
+
+サーバ自身のファイアウォール:
+
+```bash
 sudo firewall-cmd --permanent --add-service=http --add-service=https
 sudo firewall-cmd --permanent --add-port=20000-20200/udp
 sudo firewall-cmd --reload
-
-# 3. データフォルダ
-sudo mkdir -p /srv/macross/data /srv/macross/recordings /srv/macross/work
-
-# 4. 設定: Macross.yaml の janus.public_ip にサーバのグローバル IP を書く
-sudo dnf install -y nano
-nano Macross.yaml
-
-# 5. 起動（HTTPS 込み）
-MACROSS_DOMAIN=macross.build-maika.jp docker compose --profile tls up -d --build
-
-# 6. 初期管理者の ID と初期パスワードを確認
-docker compose logs server | grep 初期管理者
 ```
 
-- DNS の A レコードをサーバのグローバル IP に向けておくこと（Caddy の証明書取得に必要）
-- ルータ / クラウドのセキュリティグループでも TCP 80・443、UDP 20000-20200 を開放すること
-- Cloudflare Tunnel を使う場合は Caddy を起動せず、Tunnel の転送先を `http://127.0.0.1:8080` にする（音声の UDP は Tunnel を通らないので、UDP ポートの開放は必要）。この場合 File Browser（127.0.0.1:8090）には外部から届かないため、録音は `ssh -L 8090:127.0.0.1:8090` などで閲覧する
+### 4. Docker とフォルダの準備
+
+```bash
+sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin nano
+sudo systemctl enable --now docker
+
+sudo mkdir -p /srv/macross/data /srv/macross/recordings /srv/macross/work
+```
+
+SELinux が有効で `/srv/macross` に書き込めない場合は `sudo chcon -Rt container_file_t /srv/macross`。
+
+### 5. Macross.yaml の設定（ドメイン・IP）
+
+設定は `Macross.yaml` だけで行う。起動時に `config` コンテナがこのファイルから Janus・Caddy（HTTPS）・Grafana の設定を自動生成する。
+
+```bash
+nano Macross.yaml
+```
+
+最低限、次の2か所を書き換える。
+
+```yaml
+server:
+  domain: "macross.build-maika.jp"   # 手順2で DNS に登録したドメイン
+  https: "caddy"                     # Caddy が HTTPS 証明書を自動取得（Cloudflare Tunnel を使う場合は tunnel）
+  acme_email: "you@example.com"      # 任意。証明書の期限切れ通知の宛先
+
+janus:
+  public_ip: "203.0.113.10"          # 手順1の IP（音声はドメインではなくこの IP に直接届く）
+```
+
+`server.domain` が空だと起動時に `config` コンテナがエラーで止まり、ほかのコンテナも起動しない（`sudo docker compose logs config` で理由を確認できる）。
+
+### 6. 起動
+
+```bash
+sudo docker compose up -d --build
+```
+
+初回はビルドに数分かかる。生成された設定は次で確認できる。
+
+```bash
+sudo docker compose logs config
+# → 設定を生成しました: https://macross.build-maika.jp / Janus public_ip=203.0.113.10, UDP 20000-20200
+```
+
+### 7. HTTPS 証明書の確認
+
+```bash
+sudo docker compose logs caddy | grep -i "certificate obtained"
+```
+
+`certificate obtained successfully` が出ていれば、`https://macross.build-maika.jp` で開ける。
+
+### 8. 初期管理者でログイン
+
+```bash
+sudo docker compose logs server | grep 初期管理者
+```
+
+表示された ID（`0001`）と初期パスワードでログインし、新しいパスワードを設定する。
+
+### ドメインや設定を変更するとき
+
+1. （ドメインを変える場合）新しいドメインで手順2（DNS）を行う
+2. `Macross.yaml` を書き換える
+3. 設定を作り直して再起動する（新しいドメインの証明書は自動で取得される）
+
+   ```bash
+   sudo docker compose down && sudo docker compose up -d
+   ```
+
+### うまくいかないとき
+
+| 症状 | 確認すること |
+|---|---|
+| どのコンテナも起動しない | `sudo docker compose logs config`（`Macross.yaml` の書き間違い・`server.domain` 未設定） |
+| `https://` で開けない、証明書エラー | `dig` で IP が正しいか、TCP 80・443 が外から届くか、Cloudflare が DNS only か。`sudo docker compose logs caddy` |
+| ログインできるが「接続する」で失敗する | `sudo docker compose logs janus`、`sudo docker compose logs server` |
+| 接続済みになるが音声が聞こえない | `janus.public_ip` が正しいか、UDP 20000-20200 がルータ・ファイアウォールで開いているか |
+| 録音が保存されない | `sudo docker compose logs server \| grep 録音` |
+
+### Cloudflare Tunnel を使う場合（任意）
+
+ポート 80・443 を開けられない環境向け。HTTPS は Cloudflare が受け持ち、Caddy は `127.0.0.1:8081` で Tunnel からの通信だけを受ける。
+
+1. `Macross.yaml` を `https: "tunnel"` にして起動する（手順2の A レコード登録と TCP 80・443 の開放は不要）
+
+   ```yaml
+   server:
+     domain: "macross.build-maika.jp"
+     https: "tunnel"
+   ```
+
+2. サーバに cloudflared を入れてトンネルを作る
+
+   ```bash
+   cloudflared tunnel login
+   cloudflared tunnel create macross
+   cloudflared tunnel route dns macross macross.build-maika.jp   # DNS は自動で CNAME が作られる（手順2の A レコードは不要）
+   ```
+
+3. `~/.cloudflared/config.yml` で転送先を Caddy（`127.0.0.1:8081`）に向けて、サービスとして起動する
+
+   ```yaml
+   tunnel: macross
+   credentials-file: /root/.cloudflared/<トンネルID>.json
+   ingress:
+     - hostname: macross.build-maika.jp
+       service: http://127.0.0.1:8081
+     - service: http_status:404
+   ```
+
+   ```bash
+   sudo cloudflared service install
+   ```
+
+- 音声の UDP は Tunnel を通らないため、**UDP 20000-20200 の開放と `janus.public_ip` の設定は必要**
+- Caddy を経由するので、録音ブラウザ（`/files/`）と Grafana（`/grafana/`）も Tunnel 経由でそのまま使える
+
+### 補足
+
 - File Browser は録音フォルダを**読み取り専用**でマウントしている（録音の削除は保持期間による自動削除のみ）
 - Prometheus（9090）・node_exporter（9100）・Grafana（3000）・メトリクス（9180）はすべて 127.0.0.1 のみで待ち受けるため、ファイアウォールで開ける必要はない。Prometheus のデータは 90 日保持
-- SELinux が有効で `/srv/macross` に書き込めない場合は `sudo chcon -Rt container_file_t /srv/macross`
 
 ## Macross.yaml の主な項目
 
 | キー | 意味 |
 |---|---|
+| `server.domain` | 公開するドメイン（HTTPS 証明書・Grafana の URL に使う） |
+| `server.https` | `caddy`（Let's Encrypt で HTTPS）／`tunnel`（Cloudflare Tunnel） |
+| `server.acme_email` | 証明書の通知先メールアドレス（任意） |
 | `limits.max_connections` | 最大同時接続数 |
 | `channel.max_speakers` | 発言枠の初期値（管理画面で変更すると `data/settings.json` が優先） |
 | `audio.bitrate` | Opus ビットレート |
