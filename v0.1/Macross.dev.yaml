@@ -1,0 +1,23 @@
+# ローカル開発用（Windows 等で server/ から cargo run する場合）
+# 例: cd server && cargo run -- --config ../Macross.dev.yaml
+
+server:
+  listen: "127.0.0.1:8080"
+  web_dir: "../web/dist"
+  data_dir: "../dev-data"
+  cookie_secure: false
+
+limits:
+  max_connections: 30
+
+channel:
+  room_id: 1001
+  name: "ch1"
+  max_speakers: 1
+
+recording:
+  dir: "../dev-data/recordings"
+  retention_days: 90
+
+janus:
+  url: "http://127.0.0.1:8088/janus"

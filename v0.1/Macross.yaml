@@ -1,0 +1,40 @@
+# Macross サーバ設定（本番 / Docker 用）
+# ※ パスはコンテナ内のパス。docker-compose.yml の volumes と一致させること。
+
+server:
+  domain: "macross.build-maika.jp" # ★公開するドメイン（DNS の A レコードをこのサーバに向けておく）
+  https: "caddy"                # caddy  = Caddy が Let's Encrypt で HTTPS 証明書を自動取得（TCP 80/443 を開放）
+                                # tunnel = Cloudflare Tunnel を使う（Tunnel の転送先は http://127.0.0.1:8081）
+  acme_email: ""                # 証明書の期限切れ通知を受け取るメールアドレス（任意）
+  listen: "127.0.0.1:8080"      # Caddy から中継される
+  data_dir: "/srv/macross/data" # users.csv / credentials.json / settings.json
+  cookie_secure: true           # HTTPS で公開する場合は true
+  metrics_listen: "127.0.0.1:9180" # Prometheus 用 /metrics（外部に公開しない）
+
+limits:
+  max_connections: 30           # 最大同時接続数（フェーズ1は30）
+
+channel:
+  room_id: 1001
+  name: "ch1"
+  max_speakers: 1               # 発言枠の初期値（管理画面で変更可）
+
+audio:
+  sampling_rate: 48000
+  bitrate: 32000                # Opus ビットレート (bps)
+
+recording:
+  dir: "/srv/macross/recordings" # MP3 の保存先（File Browser で https://<ドメイン>/files/ から閲覧）
+  work_dir: "/srv/macross/work"  # 変換前の作業ファイル置き場（File Browser には出さない）
+  retention_days: 90             # 保持期間（3ヶ月）
+  mp3_bitrate: "64k"
+
+janus:
+  url: "http://127.0.0.1:8088/janus"
+  public_ip: ""                  # ★サーバのグローバル IP を設定する
+  rtp_port_range: "20000-20200"  # ★ファイアウォールで UDP を開放する
+  ice_servers:
+    - urls: "stun:stun.l.google.com:19302"
+
+external_api:
+  enabled: false                 # 文字起こし等（フェーズ4で実装予定）
