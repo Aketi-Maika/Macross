@@ -547,6 +547,15 @@ async function onMessage(msg) {
       break
     case 'pong':
       break
+    case 'role':
+      // 管理者が権限を変えた。メニューをすぐ切り替え、管理系の画面を開いていたら無線画面へ戻す
+      if (session.user) {
+        session.user.admin = msg.admin
+        session.user.superuser = msg.superuser
+        if (!msg.admin && router.currentRoute.value.meta.admin) router.push('/radio')
+      }
+      message.value = msg.admin ? '管理者の権限が付与されました' : '管理者の権限が解除されました'
+      break
   }
 }
 

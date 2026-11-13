@@ -3,6 +3,9 @@
 //! 自宅回線などでは 25 番ポートからの直接送信がブロックされる（OP25B）ため、
 //! プロバイダや Gmail・Microsoft 365 などの SMTP サーバ（587 / 465）を経由して送る。
 //! 送信元アドレスを空にすると Macross.yaml の mail.default_from を使う。
+//!
+//! 既定の送信サーバ（さくらのメールボックス）を Macross.yaml の mail.smtp_* に書いておくと、
+//! 管理画面でメール設定を保存していなくても、その設定で送信する（管理画面で保存した設定が優先）。
 
 use lettre::message::header::ContentType;
 use lettre::message::Mailbox;
@@ -55,6 +58,14 @@ pub struct MailView {
     pub from_name: String,
     /// 送信元を空にしたときに使うアドレス
     pub default_from: String,
+    /// いま送信に使われる設定が Macross.yaml の既定（管理画面で未設定）
+    pub builtin: bool,
+    /// 既定の送信サーバ（Macross.yaml）があるか・その内容（パスワードは返さない）
+    pub builtin_available: bool,
+    pub builtin_host: String,
+    pub builtin_username: String,
+    /// 実際に送信できる状態か（管理画面の設定が有効、または既定の送信サーバがある）
+    pub active: bool,
 }
 
 /// 管理画面からの更新。password が None（または空）なら保存済みのものを使う
@@ -75,10 +86,27 @@ pub struct Mailer {
     default_from: String,
     default_name: String,
     settings: Mutex<MailSettings>,
+    /// Macross.yaml の既定の送信サーバ（パスワードまで書かれているときだけ）
+    builtin: Option<MailSettings>,
 }
 
 impl Mailer {
-    pub fn open(path: PathBuf, default_from: &str, default_name: &str) -> Self {
+    pub fn open(path: PathBuf, cfg: &crate::config::MailCfg) -> Self {
+        let default_from = cfg.default_from.as_str();
+        let default_name = cfg.default_from_name.as_str();
+        let builtin = (!cfg.smtp_host.trim().is_empty() && !cfg.smtp_password.is_empty()).then(|| MailSettings {
+            enabled: true,
+            host: cfg.smtp_host.trim().to_string(),
+            port: if cfg.smtp_port == 0 { 587 } else { cfg.smtp_port },
+            security: if cfg.smtp_security.trim().is_empty() { "starttls".into() } else { cfg.smtp_security.trim().to_string() },
+            username: if cfg.smtp_username.trim().is_empty() { default_from.trim().to_string() } else { cfg.smtp_username.trim().to_string() },
+            password: cfg.smtp_password.clone(),
+            from_address: default_from.trim().to_string(),
+            from_name: default_name.trim().to_string(),
+        });
+        if let Some(b) = &builtin {
+            tracing::info!("既定のメール送信サーバ: {}:{} ({})", b.host, b.port, b.username);
+        }
         let mut settings: MailSettings = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
@@ -94,16 +122,33 @@ impl Mailer {
             default_from: default_from.trim().to_string(),
             default_name: default_name.trim().to_string(),
             settings: Mutex::new(settings),
+            builtin,
         }
     }
 
+    /// 送信に使う設定（管理画面で有効にした設定 → Macross.yaml の既定 の順）。どちらも無ければ None
+    fn effective(&self) -> Option<MailSettings> {
+        let s = self.settings.lock().unwrap().clone();
+        if s.enabled && !s.host.trim().is_empty() {
+            return Some(s);
+        }
+        self.builtin.clone()
+    }
+
     pub fn enabled(&self) -> bool {
-        self.settings.lock().unwrap().enabled
+        self.effective().is_some()
     }
 
     pub fn view(&self) -> MailView {
+        let active = self.effective();
         let s = self.settings.lock().unwrap();
+        let using_builtin = !(s.enabled && !s.host.trim().is_empty()) && self.builtin.is_some();
         MailView {
+            builtin: using_builtin,
+            builtin_available: self.builtin.is_some(),
+            builtin_host: self.builtin.as_ref().map(|b| format!("{}:{}", b.host, b.port)).unwrap_or_default(),
+            builtin_username: self.builtin.as_ref().map(|b| b.username.clone()).unwrap_or_default(),
+            active: active.is_some(),
             enabled: s.enabled,
             host: s.host.clone(),
             port: s.port,
@@ -157,8 +202,9 @@ impl Mailer {
     }
 
     pub async fn send(&self, to: &str, subject: &str, body: String) -> anyhow::Result<()> {
-        let s = self.settings.lock().unwrap().clone();
-        anyhow::ensure!(s.enabled, "メール送信が無効です（管理画面のメール設定で有効にしてください）");
+        let s = self.effective().ok_or_else(|| {
+            anyhow::anyhow!("メール送信が無効です（Macross.yaml の mail.smtp_password を設定するか、管理画面のメール設定で有効にしてください）")
+        })?;
         let from_name = if s.from_name.is_empty() { None } else { Some(s.from_name.clone()) };
         let from = Mailbox::new(from_name, s.from_address.parse().map_err(|_| anyhow::anyhow!("送信元アドレスが不正です"))?);
         let to: Mailbox = to.trim().parse().map_err(|_| anyhow::anyhow!("宛先アドレスが不正です: {to}"))?;

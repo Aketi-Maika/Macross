@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let metrics_listen = cfg.server.metrics_listen.clone();
     let geocoder = geocode::Geocoder::new(&cfg.location);
     let sessions = sessions::Sessions::open(data_dir.join("sessions.json"), cfg.server.session_days);
-    let mailer = mail::Mailer::open(data_dir.join("mail.json"), &cfg.mail.default_from, &cfg.mail.default_from_name);
+    let mailer = mail::Mailer::open(data_dir.join("mail.json"), &cfg.mail);
     let state = Arc::new(AppState {
         cfg,
         config_path_display,

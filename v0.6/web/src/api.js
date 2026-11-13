@@ -13,6 +13,10 @@ async function request(method, path, body) {
   if (res.status === 204) return null
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
+    // 管理者の権限が外された・ログインが切れた: 画面のログイン情報を取り直す（メニューを最新に）
+    if ((res.status === 403 && path.startsWith('/api/admin')) || (res.status === 401 && path !== '/api/me' && path !== '/api/login')) {
+      onAuthChanged()
+    }
     const err = new Error(data.error || `エラーが発生しました (${res.status})`)
     err.status = res.status
     throw err
@@ -26,6 +30,17 @@ export const api = {
   put: (p, b) => request('PUT', p, b),
   patch: (p, b) => request('PATCH', p, b),
   del: (p) => request('DELETE', p),
+}
+
+let authCheck = null
+function onAuthChanged() {
+  if (authCheck) return
+  authCheck = loadSession().finally(() => {
+    authCheck = null
+    const hash = window.location.hash
+    if (!session.user) window.location.hash = '#/login'
+    else if (!session.user.admin && /^#\/(admin|map|recordings)/.test(hash)) window.location.hash = '#/radio'
+  })
 }
 
 export async function loadSession() {

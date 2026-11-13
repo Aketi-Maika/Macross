@@ -230,11 +230,28 @@ pub struct MailCfg {
     /// メール設定で送信元アドレスを空にしたときに使うアドレス
     pub default_from: String,
     pub default_from_name: String,
+    /// 既定の SMTP サーバ（さくらのメールボックス）。管理画面でメール設定を保存していないときはこれで送る。
+    /// smtp_password が空なら既定の送信は無効（管理画面で設定する）
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    /// starttls（587）/ tls（465）
+    pub smtp_security: String,
+    /// 空なら default_from を使う（さくらはメールアドレス全体がユーザ名）
+    pub smtp_username: String,
+    pub smtp_password: String,
 }
 
 impl Default for MailCfg {
     fn default() -> Self {
-        Self { default_from: "unit_genesis-aerial@macross.build-maika.jp".into(), default_from_name: "Macross".into() }
+        Self {
+            default_from: "unit_genesis-aerial@macross.build-maika.jp".into(),
+            default_from_name: "Macross".into(),
+            smtp_host: "www2835.sakura.ne.jp".into(),
+            smtp_port: 587,
+            smtp_security: "starttls".into(),
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+        }
     }
 }
 

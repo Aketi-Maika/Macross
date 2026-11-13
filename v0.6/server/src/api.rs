@@ -414,11 +414,16 @@ pub async fn update_user(
     st.users.update_flags(&id, req.admin, req.disabled)?;
     if req.admin.is_some() {
         // admin はすべてのチャンネルを使える。権限の変更を接続中のページに反映する
+        // （割り込みの強さ・発言者欄の「管理者」表示・ブラウザのメニューもすぐ切り替える）
         st.radio.set_access(&id, st.users.channels_of(&id));
+        if let Some(u) = st.users.get(&id) {
+            st.radio.set_role(&id, u.admin, u.superuser);
+        }
     }
     if req.disabled == Some(true) {
-        // 無効化したユーザのログインセッションを破棄
+        // 無効化したユーザのログインセッションを破棄し、無線も切断する
         st.sessions.remove_user(&id);
+        st.radio.kick_user(&id, "この ID は管理者により無効化されました");
     }
     tracing::info!("ID {id} の権限を変更 admin={:?} disabled={:?} (by {})", req.admin, req.disabled, admin.id);
     Ok(StatusCode::NO_CONTENT)
@@ -428,9 +433,10 @@ pub async fn update_user(
 pub struct ProfileReq {
     name: Option<String>,
     furigana: Option<String>,
+    email: Option<String>,
 }
 
-/// 名前・ふりがなの変更。自分自身と一般ユーザは admin が、0000 と他の admin はスーパーユーザーが変更できる
+/// 名前・ふりがな・メールアドレスの変更。自分自身と一般ユーザは admin が、0000 と他の admin はスーパーユーザーが変更できる
 pub async fn update_profile(
     State(st): State<Arc<AppState>>,
     AdminUser(admin): AdminUser,
@@ -439,14 +445,19 @@ pub async fn update_profile(
 ) -> ApiResult<Json<serde_json::Value>> {
     if id != admin.id {
         if id == SUPERUSER_ID && !admin.superuser {
-            return Err(ApiError::forbidden("スーパーユーザー（0000）の名前はスーパーユーザーだけが変更できます"));
+            return Err(ApiError::forbidden("スーパーユーザー（0000）の名前・メールアドレスはスーパーユーザーだけが変更できます"));
         }
         check_target(&st, &admin, &id)?;
     }
-    let name = st.users.update_profile(&id, req.name.as_deref(), req.furigana.as_deref())?;
+    let before = st.users.contact(&id).map(|(_, e)| e).unwrap_or_default();
+    let name = st.users.update_profile(&id, req.name.as_deref(), req.furigana.as_deref(), req.email.as_deref())?;
     st.radio.rename(&id, &name);
+    let email = st.users.contact(&id).map(|(_, e)| e).unwrap_or_default();
+    if email != before {
+        tracing::info!("ID {id} のメールアドレスを変更: {before} → {email} (by {})", admin.id);
+    }
     tracing::info!("ID {id} の名前を変更: {name} (by {})", admin.id);
-    Ok(Json(serde_json::json!({ "id": id, "name": name })))
+    Ok(Json(serde_json::json!({ "id": id, "name": name, "email": email })))
 }
 
 /// パスワードリセット。新しい初期パスワードを発行し、そのユーザのログインセッションを破棄する
@@ -474,6 +485,7 @@ pub async fn reset_password(
     check_target(&st, &admin, &id)?;
     let password = st.users.reset_password(&id)?;
     st.sessions.remove_user(&id);
+    st.radio.kick_user(&id, "パスワードがリセットされたため、もう一度ログインしてください");
     tracing::info!("ID {id} のパスワードをリセット (by {})", admin.id);
     let (name, email) = st.users.contact(&id).unwrap_or_default();
     let mail = mail_password(&st, &id, &name, &email, &password, true, req.send_mail).await;

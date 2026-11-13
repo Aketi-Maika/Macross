@@ -23,7 +23,8 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
-  if (session.user === undefined) await loadSession()
+  // 管理系の画面は開くたびに権限を確かめ直す（途中で admin を外された場合に備える）
+  if (session.user === undefined || (to.meta.admin && session.user)) await loadSession()
   const u = session.user
   if (to.meta.public) return u ? (u.must_change ? '/password' : '/radio') : true
   if (!u) return '/login'

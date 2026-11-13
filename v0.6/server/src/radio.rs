@@ -60,6 +60,8 @@ pub enum ServerMsg {
     Hangup { reason: String, retry: bool },
     /// ping への応答（ブラウザが通信の途絶を検知するのに使う）
     Pong,
+    /// 権限（admin / スーパーユーザー）が変わった。ブラウザはメニュー等を切り替える
+    Role { admin: bool, superuser: bool },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -416,6 +418,27 @@ impl Radio {
             }
         }
         self.broadcast_state();
+    }
+
+    /// 権限の変更を接続中のページに反映する（割り込みの強さ・発言者欄の表示・ブラウザのメニュー）
+    pub fn set_role(&self, user_id: &str, admin: bool, superuser: bool) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            for c in inner.clients.values_mut().filter(|c| c.user_id == user_id) {
+                c.admin = admin;
+                c.superuser = superuser;
+                let _ = c.tx.send(ServerMsg::Role { admin, superuser });
+            }
+        }
+        self.broadcast_state();
+    }
+
+    /// そのユーザの無線ページを切断する（無効化・パスワードリセット時。自動再接続はさせない）
+    pub fn kick_user(&self, user_id: &str, reason: &str) {
+        let inner = self.inner.lock().unwrap();
+        for c in inner.clients.values().filter(|c| c.user_id == user_id) {
+            let _ = c.tx.send(ServerMsg::Hangup { reason: reason.into(), retry: false });
+        }
     }
 
     /// 名前の変更を接続中のページ（発言者の表示など）に反映する

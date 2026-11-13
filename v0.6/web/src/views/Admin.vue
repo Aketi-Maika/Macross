@@ -57,7 +57,7 @@ async function saveChannels(u) {
   }
 }
 
-/* 名前の編集（編集中のユーザ ID → { name, furigana }） */
+/* 名前・メールアドレスの編集（編集中のユーザ ID → { name, furigana, email }） */
 const renaming = reactive({})
 
 /** 名前を変えられるか: 自分・一般ユーザは admin、0000 と他の admin はスーパーユーザーだけ */
@@ -68,7 +68,7 @@ function canRename(u) {
 }
 
 function editName(u) {
-  renaming[u.id] = { name: u.name, furigana: u.furigana ?? '' }
+  renaming[u.id] = { name: u.name, furigana: u.furigana ?? '', email: u.email ?? '' }
 }
 
 async function saveName(u) {
@@ -79,8 +79,9 @@ async function saveName(u) {
     return
   }
   try {
-    const res = await api.put(`/api/admin/users/${u.id}/profile`, { name: r.name, furigana: r.furigana })
-    notice.value = `${u.id} の名前を「${res.name}」に変更しました（接続中なら すぐに反映されます）`
+    const res = await api.put(`/api/admin/users/${u.id}/profile`, { name: r.name, furigana: r.furigana, email: r.email })
+    const mailChanged = (u.email ?? '') !== res.email
+    notice.value = `${u.id} の${mailChanged ? '名前・メールアドレス' : '名前'}を保存しました（${res.name}${res.email ? ' / ' + res.email : ''}）`
     delete renaming[u.id]
     if (u.id === session.user?.id && session.user) session.user.name = res.name
     await load()
@@ -105,6 +106,7 @@ const hasPassword = ref(false)
 const testTo = ref('')
 const mailBusy = ref(false)
 const mailEnabled = ref(false)
+const mailInfo = ref({ builtin: false, builtin_available: false, builtin_host: '', builtin_username: '' })
 const PORTS = { starttls: 587, tls: 465, none: 25 }
 
 /* CSV 一括登録 */
@@ -121,7 +123,8 @@ function mailResult(m) {
 async function loadMail() {
   const m = await api.get('/api/admin/mail')
   hasPassword.value = m.has_password
-  mailEnabled.value = m.enabled
+  mailEnabled.value = m.active ?? m.enabled
+  mailInfo.value = m
   defaultFrom.value = m.default_from
   mail.value = { ...m, password: '' }
 }
@@ -397,7 +400,7 @@ onMounted(load)
       <p class="muted">
         ID 0000 はスーパーユーザー（最上位。無効化・権限の解除はできません）。admin の付与・解除と、他の admin の無効化・パスワードリセットはスーパーユーザーだけができます。
         「使えるチャンネル」で一般ユーザが聴ける・話せるチャンネルを制限できます（admin は常にすべて）。
-        名前の横の「変更」で名前・ふりがなを変えられます（録音の記録には、話した時点の名前が残ります）。
+        名前の横の「変更」で名前・ふりがな・メールアドレスを変えられます（録音の記録には、話した時点の名前が残ります）。
       </p>
       <label class="check">
         <input v-model="resetMail" type="checkbox" :disabled="!mailEnabled" />
@@ -424,6 +427,7 @@ onMounted(load)
                 <form v-if="renaming[u.id]" class="name-edit" @submit.prevent="saveName(u)" @keydown.esc="delete renaming[u.id]">
                   <input v-model="renaming[u.id].name" maxlength="40" required placeholder="名前" :aria-label="`${u.id} の名前`" />
                   <input v-model="renaming[u.id].furigana" maxlength="40" placeholder="ふりがな" :aria-label="`${u.id} のふりがな`" />
+                  <input v-model="renaming[u.id].email" type="email" maxlength="254" placeholder="メールアドレス（空欄可）" autocomplete="off" :aria-label="`${u.id} のメールアドレス`" />
                   <div class="row">
                     <button type="submit" class="small">保存</button>
                     <button type="button" class="secondary small" @click="delete renaming[u.id]">取消</button>
@@ -432,10 +436,10 @@ onMounted(load)
                 <template v-else>
                   {{ u.name }}
                   <span v-if="u.superuser" class="tag su">スーパーユーザー</span>
-                  <button v-if="canRename(u)" type="button" class="secondary small rename-button" :aria-label="`${u.name} の名前を変更`" title="名前を変更" @click="editName(u)">変更</button>
+                  <button v-if="canRename(u)" type="button" class="secondary small rename-button" :aria-label="`${u.name} の名前・メールアドレスを変更`" title="名前・メールアドレスを変更" @click="editName(u)">変更</button>
                   <br /><span class="muted">{{ u.furigana }}</span>
+                  <br v-if="u.email" /><span v-if="u.email" class="muted user-email">{{ u.email }}</span>
                 </template>
-                <br v-if="u.email" /><span v-if="u.email" class="muted user-email">{{ u.email }}</span>
               </td>
               <td>
                 <span v-if="u.disabled" class="status-chip">無効</span>
@@ -524,8 +528,14 @@ onMounted(load)
         初期パスワードの送信に使う SMTP サーバ。自宅・社内回線からは 25 番ポートで直接送れないことが多いため、プロバイダや
         Gmail（アプリパスワード）・Microsoft 365 などの送信サーバ（587 / 465）を指定してください。
       </p>
+      <p v-if="mailInfo.builtin" class="notice builtin-mail">
+        <UiIcon name="check" />既定のメールサーバ（さくら <code>{{ mailInfo.builtin_host }}</code> / <code>{{ mailInfo.builtin_username }}</code>）で送信します。設定は不要です。別のサーバを使う場合だけ、下で設定して「有効にする」をオンにしてください。
+      </p>
+      <p v-else-if="!mailInfo.builtin_available && !mailEnabled" class="muted">
+        既定のメールサーバ（Macross.yaml の <code>mail.smtp_password</code>）が未設定です。サーバの設定ファイルに書くか、下で設定してください。
+      </p>
       <form @submit.prevent="saveMail">
-        <label class="check"><input v-model="mail.enabled" type="checkbox" /> メール送信を有効にする</label>
+        <label class="check"><input v-model="mail.enabled" type="checkbox" /> {{ mailInfo.builtin_available ? '既定の代わりに下の設定で送信する' : 'メール送信を有効にする' }}</label>
         <div class="row">
           <div class="grow">
             <label for="smtp-host">SMTP サーバ</label>
@@ -586,7 +596,7 @@ onMounted(load)
           {{ mailBusy ? '送信中…' : 'テスト送信' }}
         </button>
       </form>
-      <p v-if="!mailEnabled" class="muted">保存してメール送信を有効にすると、テスト送信できます。</p>
+      <p v-if="!mailEnabled" class="muted">メールサーバを設定すると、テスト送信できます。</p>
       </aside>
     </div>
 
@@ -618,6 +628,7 @@ onMounted(load)
 .users-side { grid-column: 2; order: 2; display: grid; gap: 20px; align-content: start; min-width: 0; }
 .user-email { overflow-wrap: anywhere; }
 .name-cell { min-width: 150px; }
+.builtin-mail { display: flex; gap: 8px; align-items: flex-start; }
 .rename-button { min-height: 28px; padding: 2px 8px; margin-left: 4px; font-size: .75rem; }
 .name-edit { display: grid; gap: 6px; min-width: 180px; }
 .name-edit input { min-height: 36px; padding: 6px 9px; }

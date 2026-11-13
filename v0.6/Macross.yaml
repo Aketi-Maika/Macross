@@ -59,11 +59,18 @@ janus:
 superuser:                       # ID 0000（スーパーユーザー・最上位ロール。起動時に無ければ作られる）
   name: "スーパーユーザー"          # 0000 を作るときの表示名（その後は管理画面の「変更」で変える）
   furigana: ""
-  email: ""
+  email: ""                      # 0000 を作るときのメールアドレス（その後は管理画面の「変更」で変える）
 
 mail:
   default_from: "unit_genesis-aerial@macross.build-maika.jp" # 管理画面のメール設定で送信元を空にしたときのアドレス
   default_from_name: "Macross"
+  # 既定のメール送信サーバ（さくらのメールボックス）。smtp_password を書くと、管理画面で設定しなくても送信できる
+  # （管理画面のメール設定で「既定の代わりに下の設定で送信する」をオンにすると、そちらが優先）
+  smtp_host: "www2835.sakura.ne.jp"
+  smtp_port: 587                 # 587 = STARTTLS / 465 = SSL
+  smtp_security: "starttls"      # starttls / tls
+  smtp_username: ""              # 空なら default_from（さくらはメールアドレス全体がユーザ名）
+  smtp_password: ""              # ★メールボックスのパスワード（このファイルは root だけが読めるようにする: chmod 600）
 
 location:
   enabled: true                  # 無線ページでブラウザの位置情報（GPS）を送り、管理者が「地図」で見る（本人の許可が必要）

@@ -126,8 +126,8 @@ impl UserStore {
         Ok((store, bootstrap))
     }
 
-    /// 0000 を用意する。Macross.yaml の superuser の名前・ふりがなは 0000 を作るときだけ使う
-    /// （その後は管理画面で変更できる）。メールアドレスは設定されていれば起動のたびに反映する
+    /// 0000 を用意する。Macross.yaml の superuser の名前・ふりがな・メールアドレスは 0000 を作るときだけ使う
+    /// （その後は管理画面で変更できる）
     fn ensure_superuser(&self, su: &crate::config::SuperuserCfg) -> anyhow::Result<Option<(String, String)>> {
         let mut inner = self.inner.lock().unwrap();
         let mut created = None;
@@ -150,7 +150,7 @@ impl UserStore {
         if created.is_some() && !su.furigana.trim().is_empty() {
             row.furigana = su.furigana.trim().into();
         }
-        if !su.email.trim().is_empty() {
+        if created.is_some() && !su.email.trim().is_empty() {
             check_email(&su.email)?;
             row.email = su.email.trim().into();
         }
@@ -269,12 +269,16 @@ impl UserStore {
     }
 
     /// 名前・ふりがなを変更する（None の項目はそのまま）。変更後の名前を返す
-    pub fn update_profile(&self, id: &str, name: Option<&str>, furigana: Option<&str>) -> anyhow::Result<String> {
+    /// 名前・ふりがな・メールアドレスの変更（None の項目はそのまま。メールアドレスは空にもできる）
+    pub fn update_profile(&self, id: &str, name: Option<&str>, furigana: Option<&str>, email: Option<&str>) -> anyhow::Result<String> {
         let name = name.map(check_person_name).transpose()?;
         let furigana = furigana.map(|f| f.trim().to_string());
         if let Some(f) = &furigana {
             anyhow::ensure!(f.chars().count() <= NAME_MAX_CHARS, "ふりがなは{NAME_MAX_CHARS}文字以内にしてください");
             anyhow::ensure!(!f.chars().any(char::is_control), "ふりがなに使えない文字が含まれています");
+        }
+        if let Some(e) = email {
+            check_email(e)?;
         }
         let mut inner = self.inner.lock().unwrap();
         let row = inner.rows.iter_mut().find(|r| r.id == id).ok_or_else(|| anyhow!("ID {id} は存在しません"))?;
@@ -283,6 +287,9 @@ impl UserStore {
         }
         if let Some(f) = furigana {
             row.furigana = f;
+        }
+        if let Some(e) = email {
+            row.email = e.trim().to_string();
         }
         let new_name = row.name.clone();
         self.save(&inner)?;
@@ -388,6 +395,9 @@ pub struct ImportRow {
 
 fn check_email(email: &str) -> anyhow::Result<()> {
     let e = email.trim();
+    if e.chars().count() > 254 {
+        bail!("メールアドレスが長すぎます");
+    }
     if !e.is_empty() && e.parse::<lettre::Address>().is_err() {
         bail!("メールアドレスの形式が不正です: {e}");
     }
