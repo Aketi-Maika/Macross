@@ -1,0 +1,81 @@
+# Macross サーバ設定（本番 / Docker 用）
+#
+# ★ これはひな形です。サーバでは /srv/macross/Macross.yaml を編集します（管理画面の「サーバ」欄にも場所を表示）。
+#    初回: sudo install -D -m 600 Macross.yaml /srv/macross/Macross.yaml
+#    変更後: cd /opt/macross && docker compose down && docker compose up -d
+#
+# ※ パスはコンテナ内のパス。docker-compose.yml の volumes と一致させること。
+
+server:
+  domain: "macross.build-maika.jp" # ★公開するドメイン（DNS の A レコードをこのサーバに向けておく）
+  https: "caddy"                # caddy  = Caddy が Let's Encrypt で HTTPS 証明書を自動取得（TCP 80/443 を開放）
+                                # tunnel = Cloudflare Tunnel を使う（Tunnel の転送先は http://127.0.0.1:8081）
+
+                                # internal = LAN 内の検証用。自己署名証明書（domain に IP も可）
+  acme_email: ""                # 証明書の期限切れ通知を受け取るメールアドレス（任意）
+  lan_hosts: []                 # https: caddy のとき、LAN から IP でも開けるようにする（例: ["10.40.0.13"]。自己署名証明書）
+  listen: "127.0.0.1:8080"      # Caddy から中継される
+  data_dir: "/srv/macross/data" # users.csv / credentials.json / channels.json
+  cookie_secure: true           # HTTPS で公開する場合は true
+  metrics_listen: "127.0.0.1:9180" # Prometheus 用 /metrics（外部に公開しない）
+  session_days: 30              # ログインを保つ日数（使っている間は自動で延長。サーバを再起動してもログインしたまま）
+
+limits:
+  max_connections: 30           # 最大同時接続数（フェーズ1は30）
+
+channels:
+  room_base: 1001               # チャンネル n は Janus のルーム番号 room_base + n - 1
+  initial:                      # 初回起動時に作るチャンネル（最大9。以降は管理画面で追加・削除・変更）
+    - name: "ch1"
+      max_speakers: 1           # 発言枠（同時に話せる人数）
+    - name: "ch2"
+      max_speakers: 1
+
+audio:
+  sampling_rate: 48000
+  bitrate: 32000                # Opus ビットレート (bps)
+
+recording:
+  dir: "/srv/macross/recordings" # MP3 の保存先（File Browser で https://<ドメイン>/files/ から閲覧）
+  work_dir: "/srv/macross/work"  # 変換前の作業ファイル置き場（File Browser には出さない）
+  retention_days: 90             # 保持期間（3ヶ月）
+  mp3_bitrate: "64k"
+  delete_silent: true            # 無音の録音（押しただけで話していない）は保存しない
+  silence_threshold_db: -45      # この音量 (dBFS) を一度も超えなかったら無音とみなす（小声が消える場合は -55 など小さく）
+
+tts:
+  enabled: true                  # テキスト読み上げ（Open JTalk）
+  voice_dir: "/srv/macross/voices" # ここに置いた *.htsvoice も声の候補にする（任意）
+  max_chars: 200                 # 1 回の最大文字数
+  cooldown_secs: 3               # 同じ人が続けて送れる間隔（秒）
+
+janus:
+  url: "http://127.0.0.1:8088/janus"
+  public_ip: ""                  # ★サーバのグローバル IP を設定する
+  rtp_port_range: "20000-20200"  # ★ファイアウォールで UDP を開放する
+  ice_servers:
+    - urls: "stun:stun.l.google.com:19302"
+
+superuser:                       # ID 0000（スーパーユーザー・最上位ロール。起動時に無ければ作られる）
+  name: "スーパーユーザー"          # 0000 を作るときの表示名（その後は管理画面の「変更」で変える）
+  furigana: ""
+  email: ""
+
+mail:
+  default_from: "unit_genesis-aerial@macross.build-maika.jp" # 管理画面のメール設定で送信元を空にしたときのアドレス
+  default_from_name: "Macross"
+
+location:
+  enabled: true                  # 無線ページでブラウザの位置情報（GPS）を送り、管理者が「地図」で見る（本人の許可が必要）
+  record_interval_secs: 30       # 位置を data/gnss/日付.csv に記録する間隔（秒）。地図の履歴はこの CSV から表示する
+  record_min_move_m: 20          # これ以上動いたら間隔を待たずに記録する（m）
+  retention_days: 90             # 位置の記録を残す日数（0 = 削除しない）
+  reverse_geocode: true          # 地図で点を押したときに住所を出す（国土地理院の逆ジオコーダに座標だけを送る）
+  glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf" # 地図のまとまりの件数の文字（空なら件数を出さない）
+  base_tiles: "https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png"            # 背景（地理院タイル 標準地図）
+  photo_tiles: "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg" # 航空写真
+  buildings_tilejson: "https://tiles.openfreemap.org/planet"                       # 3D の建物（空なら出さない）
+  terrain_tiles: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png" # 地形（空なら出さない）
+
+external_api:
+  enabled: false                 # 文字起こし等（フェーズ4で実装予定）
