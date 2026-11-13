@@ -1,4 +1,4 @@
-//! Macross v0.4 サーバ（9チャンネル・LR受聴・TTS・位置情報）
+//! Macross v0.5 サーバ（9チャンネル・LR受聴・TTS・位置情報）
 //!
 //! 使い方: macross [--config Macross.yaml]
 //!         macross [--config Macross.yaml] reset-superuser   … 0000 のパスワードをリセット（サーバ停止中に実行）
@@ -130,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/admin/users/:id", patch(api::update_user))
         .route("/api/admin/users/:id/reset-password", post(api::reset_password))
         .route("/api/admin/users/:id/channels", put(api::set_user_channels))
+        .route("/api/admin/users/:id/profile", put(api::update_profile))
         .route("/api/admin/locations", get(api::locations))
         .route("/api/admin/system", get(api::system))
         .route("/api/auth/admin", get(api::auth_admin))
@@ -140,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .with_context(|| format!("{listen} で待ち受けできません"))?;
-    tracing::info!("Macross v0.4 を起動しました: http://{listen}");
+    tracing::info!("Macross v0.5 を起動しました: http://{listen}");
     axum::serve(listener, app).await?;
     Ok(())
 }

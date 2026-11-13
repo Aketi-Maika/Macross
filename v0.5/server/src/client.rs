@@ -364,7 +364,8 @@ impl Ctx {
         let job = TtsJob {
             conn: self.conn,
             user_id: self.user.id.clone(),
-            name: self.user.name.clone(),
+            // 接続中に管理画面で名前が変わっていても、いまの名前で記録する
+            name: self.st.users.get(&self.user.id).map(|u| u.name).unwrap_or_else(|| self.user.name.clone()),
             channel_id: leg.channel,
             text,
         };

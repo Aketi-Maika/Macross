@@ -1,6 +1,6 @@
 [package]
 name = "macross"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Macross α: PTT radio over WebRTC (Janus AudioBridge MCU)"
 

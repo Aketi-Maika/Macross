@@ -413,6 +413,31 @@ pub async fn update_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+pub struct ProfileReq {
+    name: Option<String>,
+    furigana: Option<String>,
+}
+
+/// 名前・ふりがなの変更。自分自身と一般ユーザは admin が、0000 と他の admin はスーパーユーザーが変更できる
+pub async fn update_profile(
+    State(st): State<Arc<AppState>>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<String>,
+    Json(req): Json<ProfileReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if id != admin.id {
+        if id == SUPERUSER_ID && !admin.superuser {
+            return Err(ApiError::forbidden("スーパーユーザー（0000）の名前はスーパーユーザーだけが変更できます"));
+        }
+        check_target(&st, &admin, &id)?;
+    }
+    let name = st.users.update_profile(&id, req.name.as_deref(), req.furigana.as_deref())?;
+    st.radio.rename(&id, &name);
+    tracing::info!("ID {id} の名前を変更: {name} (by {})", admin.id);
+    Ok(Json(serde_json::json!({ "id": id, "name": name })))
+}
+
 /// パスワードリセット。新しい初期パスワードを発行し、そのユーザのログインセッションを破棄する
 #[derive(Deserialize, Default)]
 pub struct ResetReq {

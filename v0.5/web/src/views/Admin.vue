@@ -57,6 +57,38 @@ async function saveChannels(u) {
   }
 }
 
+/* 名前の編集（編集中のユーザ ID → { name, furigana }） */
+const renaming = reactive({})
+
+/** 名前を変えられるか: 自分・一般ユーザは admin、0000 と他の admin はスーパーユーザーだけ */
+function canRename(u) {
+  if (u.id === session.user?.id) return true
+  if (u.id === SUPERUSER) return isSuper()
+  return isSuper() || !u.admin
+}
+
+function editName(u) {
+  renaming[u.id] = { name: u.name, furigana: u.furigana ?? '' }
+}
+
+async function saveName(u) {
+  error.value = notice.value = ''
+  const r = renaming[u.id]
+  if (!r.name.trim()) {
+    error.value = '名前を入力してください'
+    return
+  }
+  try {
+    const res = await api.put(`/api/admin/users/${u.id}/profile`, { name: r.name, furigana: r.furigana })
+    notice.value = `${u.id} の名前を「${res.name}」に変更しました（接続中なら すぐに反映されます）`
+    delete renaming[u.id]
+    if (u.id === session.user?.id && session.user) session.user.name = res.name
+    await load()
+  } catch (err) {
+    error.value = err.message
+  }
+}
+
 /** 他の admin の操作はスーパーユーザーだけ */
 function canManage(u) {
   if (u.id === SUPERUSER || u.id === session.user?.id) return false
@@ -365,6 +397,7 @@ onMounted(load)
       <p class="muted">
         ID 0000 はスーパーユーザー（最上位。無効化・権限の解除はできません）。admin の付与・解除と、他の admin の無効化・パスワードリセットはスーパーユーザーだけができます。
         「使えるチャンネル」で一般ユーザが聴ける・話せるチャンネルを制限できます（admin は常にすべて）。
+        名前の横の「変更」で名前・ふりがなを変えられます（録音の記録には、話した時点の名前が残ります）。
       </p>
       <label class="check">
         <input v-model="resetMail" type="checkbox" :disabled="!mailEnabled" />
@@ -387,10 +420,21 @@ onMounted(load)
           <tbody>
             <tr v-for="u in users" :key="u.id">
               <td>{{ u.id }}</td>
-              <td>
-                {{ u.name }}
-                <span v-if="u.superuser" class="tag su">スーパーユーザー</span>
-                <br /><span class="muted">{{ u.furigana }}</span>
+              <td class="name-cell">
+                <form v-if="renaming[u.id]" class="name-edit" @submit.prevent="saveName(u)" @keydown.esc="delete renaming[u.id]">
+                  <input v-model="renaming[u.id].name" maxlength="40" required placeholder="名前" :aria-label="`${u.id} の名前`" />
+                  <input v-model="renaming[u.id].furigana" maxlength="40" placeholder="ふりがな" :aria-label="`${u.id} のふりがな`" />
+                  <div class="row">
+                    <button type="submit" class="small">保存</button>
+                    <button type="button" class="secondary small" @click="delete renaming[u.id]">取消</button>
+                  </div>
+                </form>
+                <template v-else>
+                  {{ u.name }}
+                  <span v-if="u.superuser" class="tag su">スーパーユーザー</span>
+                  <button v-if="canRename(u)" type="button" class="secondary small rename-button" :aria-label="`${u.name} の名前を変更`" title="名前を変更" @click="editName(u)">変更</button>
+                  <br /><span class="muted">{{ u.furigana }}</span>
+                </template>
                 <br v-if="u.email" /><span v-if="u.email" class="muted user-email">{{ u.email }}</span>
               </td>
               <td>
@@ -573,6 +617,10 @@ onMounted(load)
 .users-panel { grid-column: 1; order: 1; }
 .users-side { grid-column: 2; order: 2; display: grid; gap: 20px; align-content: start; min-width: 0; }
 .user-email { overflow-wrap: anywhere; }
+.name-cell { min-width: 150px; }
+.rename-button { min-height: 28px; padding: 2px 8px; margin-left: 4px; font-size: .75rem; }
+.name-edit { display: grid; gap: 6px; min-width: 180px; }
+.name-edit input { min-height: 36px; padding: 6px 9px; }
 .users-panel table { font-size: .85rem; }
 .users-panel th, .users-panel td { padding: 12px 9px; }
 .channels-panel input.grow { min-width: 200px; }

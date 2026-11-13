@@ -428,6 +428,17 @@ impl Radio {
         self.broadcast_state();
     }
 
+    /// 名前の変更を接続中のページ（発言者の表示など）に反映する
+    pub fn rename(&self, user_id: &str, name: &str) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            for c in inner.clients.values_mut().filter(|c| c.user_id == user_id) {
+                c.name = name.to_string();
+            }
+        }
+        self.broadcast_state();
+    }
+
     /// 位置を更新
     pub fn set_location(&self, conn: u64, mut loc: Location) -> bool {
         if !loc.valid() {

@@ -126,7 +126,8 @@ impl UserStore {
         Ok((store, bootstrap))
     }
 
-    /// 0000 を用意し、Macross.yaml の superuser の名前などを反映する
+    /// 0000 を用意する。Macross.yaml の superuser の名前・ふりがなは 0000 を作るときだけ使う
+    /// （その後は管理画面で変更できる）。メールアドレスは設定されていれば起動のたびに反映する
     fn ensure_superuser(&self, su: &crate::config::SuperuserCfg) -> anyhow::Result<Option<(String, String)>> {
         let mut inner = self.inner.lock().unwrap();
         let mut created = None;
@@ -146,10 +147,7 @@ impl UserStore {
             created = Some((SUPERUSER_ID.to_string(), password));
         }
         let row = inner.rows.iter_mut().find(|r| r.id == SUPERUSER_ID).unwrap();
-        if !su.name.trim().is_empty() {
-            row.name = su.name.trim().into();
-        }
-        if !su.furigana.trim().is_empty() {
+        if created.is_some() && !su.furigana.trim().is_empty() {
             row.furigana = su.furigana.trim().into();
         }
         if !su.email.trim().is_empty() {
@@ -234,10 +232,8 @@ impl UserStore {
 
     /// ID を自動発行してユーザを作成。初期パスワードを返す
     pub fn create_user(&self, name: &str, furigana: &str, email: &str) -> anyhow::Result<(String, String)> {
-        let name = name.trim();
-        if name.is_empty() {
-            bail!("名前を入力してください");
-        }
+        let name = check_person_name(name)?;
+        let name = name.as_str();
         check_email(email)?;
         let mut inner = self.inner.lock().unwrap();
         let next = inner.rows.iter().filter_map(|r| r.id.parse::<u32>().ok()).max().unwrap_or(0) + 1;
@@ -270,6 +266,27 @@ impl UserStore {
     pub fn contact(&self, id: &str) -> Option<(String, String)> {
         let inner = self.inner.lock().unwrap();
         inner.rows.iter().find(|r| r.id == id).map(|r| (r.name.clone(), r.email.clone()))
+    }
+
+    /// 名前・ふりがなを変更する（None の項目はそのまま）。変更後の名前を返す
+    pub fn update_profile(&self, id: &str, name: Option<&str>, furigana: Option<&str>) -> anyhow::Result<String> {
+        let name = name.map(check_person_name).transpose()?;
+        let furigana = furigana.map(|f| f.trim().to_string());
+        if let Some(f) = &furigana {
+            anyhow::ensure!(f.chars().count() <= NAME_MAX_CHARS, "ふりがなは{NAME_MAX_CHARS}文字以内にしてください");
+            anyhow::ensure!(!f.chars().any(char::is_control), "ふりがなに使えない文字が含まれています");
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let row = inner.rows.iter_mut().find(|r| r.id == id).ok_or_else(|| anyhow!("ID {id} は存在しません"))?;
+        if let Some(n) = name {
+            row.name = n;
+        }
+        if let Some(f) = furigana {
+            row.furigana = f;
+        }
+        let new_name = row.name.clone();
+        self.save(&inner)?;
+        Ok(new_name)
     }
 
     pub fn update_flags(&self, id: &str, admin: Option<bool>, disabled: Option<bool>) -> anyhow::Result<()> {
@@ -436,6 +453,18 @@ fn random_password(len: usize) -> String {
     const CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut rng = rand::thread_rng();
     (0..len).map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char).collect()
+}
+
+/// 名前・ふりがなの最大文字数
+pub const NAME_MAX_CHARS: usize = 40;
+
+/// 人の名前の確認（空・長すぎ・制御文字を弾く）
+fn check_person_name(name: &str) -> anyhow::Result<String> {
+    let name = name.trim();
+    anyhow::ensure!(!name.is_empty(), "名前を入力してください");
+    anyhow::ensure!(name.chars().count() <= NAME_MAX_CHARS, "名前は{NAME_MAX_CHARS}文字以内にしてください");
+    anyhow::ensure!(!name.chars().any(char::is_control), "名前に使えない文字が含まれています");
+    Ok(name.to_string())
 }
 
 pub fn random_token(len: usize) -> String {
