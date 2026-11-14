@@ -32,7 +32,7 @@ channels:
       max_speakers: 1
 
 audio:
-  sampling_rate: 48000
+  sampling_rate: 16000          # 16000 = 無線の音声に十分・Janus の負荷が軽い（48000 は高音質だが 100 人規模では CPU が足りない）
   bitrate: 32000                # Opus ビットレート (bps)
 
 recording:
@@ -53,6 +53,7 @@ janus:
   url: "http://127.0.0.1:8088/janus"
   public_ip: ""                  # ★サーバのグローバル IP を設定する
   rtp_port_range: "20000-20200"  # ★ファイアウォールで UDP を開放する
+  event_loops: 4                 # Janus の共有イベントループ数（CPU のコア数程度。0 = 接続ごとにスレッド）
   ice_servers:
     - urls: "stun:stun.l.google.com:19302"
 

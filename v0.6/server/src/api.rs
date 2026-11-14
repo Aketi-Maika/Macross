@@ -128,7 +128,13 @@ pub async fn login(
     jar: CookieJar,
     Json(req): Json<LoginReq>,
 ) -> ApiResult<(CookieJar, Json<AuthUser>)> {
-    let user = match st.users.authenticate(req.id.trim(), &req.password) {
+    // Argon2 の計算は重いので、通信を処理するスレッドを塞がないよう別スレッドで行う
+    let st2 = st.clone();
+    let (login_id, password) = (req.id.trim().to_string(), req.password.clone());
+    let result = tokio::task::spawn_blocking(move || st2.users.authenticate(&login_id, &password))
+        .await
+        .map_err(|e| ApiError::bad(format!("ログイン処理に失敗しました: {e}")))?;
+    let user = match result {
         Ok(u) => {
             Metrics::inc(&st.metrics.login_success_total);
             u
@@ -186,7 +192,11 @@ pub async fn change_password(
     CurrentUser(u): CurrentUser,
     Json(req): Json<PasswordReq>,
 ) -> ApiResult<Json<AuthUser>> {
-    st.users.change_password(&u.id, &req.current, &req.new)?;
+    let st2 = st.clone();
+    let id = u.id.clone();
+    tokio::task::spawn_blocking(move || st2.users.change_password(&id, &req.current, &req.new))
+        .await
+        .map_err(|e| ApiError::bad(format!("パスワード変更に失敗しました: {e}")))??;
     let user = st.users.get(&u.id).ok_or_else(ApiError::unauthorized)?;
     Ok(Json(user))
 }

@@ -452,15 +452,20 @@ impl UserStore {
         Some(Self::to_auth(row, &cred))
     }
 
-    /// ログイン。ID は表示用（先頭の 0 は省略可。例: 12 = 00000012）または 12 桁
+    /// ログイン。ID はイベント ID-表示 ID（先頭の 0 は省略可）または 16 桁。
+    /// パスワードの照合（Argon2。1 回数十〜百ミリ秒）はロックの外で行う
+    /// （同時に大勢がログインしても、ほかの人の画面・無線の処理を待たせない）
     pub fn authenticate(&self, login_id: &str, password: &str) -> Result<AuthUser, LoginError> {
-        let inner = self.inner.lock().unwrap();
-        let row = resolve_login(&inner.rows, login_id).ok_or(LoginError::Invalid)?;
-        Self::check_password(&inner, row, password)
+        let (row, cred) = {
+            let inner = self.inner.lock().unwrap();
+            let row = resolve_login(&inner.rows, login_id).ok_or(LoginError::Invalid)?.clone();
+            let cred = inner.creds.get(&row.id).cloned().unwrap_or_default();
+            (row, cred)
+        };
+        Self::check_password(&row, &cred, password)
     }
 
-    fn check_password(inner: &Inner, row: &UserRow, password: &str) -> Result<AuthUser, LoginError> {
-        let cred = inner.creds.get(&row.id).cloned().unwrap_or_default();
+    fn check_password(row: &UserRow, cred: &Credential, password: &str) -> Result<AuthUser, LoginError> {
         let ok = match &cred.password_hash {
             Some(h) => verify_password(h, password),
             None => !row.initial_password.is_empty() && row.initial_password == password,
@@ -471,19 +476,22 @@ impl UserStore {
         if cred.disabled {
             return Err(LoginError::Disabled);
         }
-        Ok(Self::to_auth(row, &cred))
+        Ok(Self::to_auth(row, cred))
     }
 
     pub fn change_password(&self, id: &str, current: &str, new: &str) -> anyhow::Result<()> {
         if new.chars().count() < 8 {
             bail!("パスワードは8文字以上にしてください");
         }
-        {
+        let (row, cred) = {
             let inner = self.inner.lock().unwrap();
-            let row = inner.rows.iter().find(|r| r.id == id).ok_or_else(|| anyhow!("ユーザーが存在しません"))?;
-            if Self::check_password(&inner, row, current).is_err() {
-                bail!("現在のパスワードが違います");
-            }
+            let row = inner.rows.iter().find(|r| r.id == id).ok_or_else(|| anyhow!("ユーザーが存在しません"))?.clone();
+            let cred = inner.creds.get(id).cloned().unwrap_or_default();
+            (row, cred)
+        };
+        // 照合とハッシュ化はロックの外で
+        if Self::check_password(&row, &cred, current).is_err() {
+            bail!("現在のパスワードが違います");
         }
         let hash = hash_password(new)?;
         let mut inner = self.inner.lock().unwrap();

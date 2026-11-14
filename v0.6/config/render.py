@@ -39,6 +39,8 @@ def render_janus(cfg, out):
     url = urlparse(janus.get("url", "http://127.0.0.1:8088/janus"))
     public_ip = str(janus.get("public_ip") or "").strip()
     rtp_range = str(janus.get("rtp_port_range") or "20000-20200")
+    # 共有イベントループ（既定 4）。0 なら接続ごとにスレッドを作る（Janus の既定。人数が多いと CPU を食う）
+    event_loops = int(janus.get("event_loops", 4) or 0)
     if not public_ip:
         print("[警告] janus.public_ip が未設定です。外部からの音声が届かない可能性があります", file=sys.stderr)
 
@@ -54,6 +56,7 @@ general: {{
     log_to_stdout = true
     debug_level = 4
     session_timeout = 60
+    event_loops = {event_loops}
     server_name = "Macross"
 }}
 media: {{

@@ -102,7 +102,7 @@ pub struct AudioCfg {
 
 impl Default for AudioCfg {
     fn default() -> Self {
-        Self { sampling_rate: 48000, bitrate: 32000 }
+        Self { sampling_rate: 16000, bitrate: 32000 }
     }
 }
 
@@ -190,6 +190,8 @@ pub struct JanusCfg {
     pub rtp_port_range: String,
     /// ブラウザに渡す ICE サーバ
     pub ice_servers: Vec<IceServer>,
+    /// Janus の共有イベントループの数（0 = 接続ごとにスレッド。config/render.py が janus.jcfg に書く）
+    pub event_loops: u32,
 }
 
 impl Default for JanusCfg {
@@ -198,6 +200,7 @@ impl Default for JanusCfg {
             url: "http://127.0.0.1:8088/janus".into(),
             public_ip: String::new(),
             rtp_port_range: "20000-20200".into(),
+            event_loops: 4,
             ice_servers: vec![],
         }
     }
