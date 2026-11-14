@@ -4,6 +4,7 @@
 //!         macross [--config Macross.yaml] reset-superuser   … 0000 のパスワードをリセット（サーバ停止中に実行）
 
 mod api;
+mod audit;
 mod client;
 mod config;
 mod geocode;
@@ -41,6 +42,8 @@ pub struct AppState {
     pub recorder: recorder::Recorder,
     pub tts: tts::Tts,
     pub mailer: mail::Mailer,
+    /// 操作履歴（data/audit/YYYY-MM.csv）
+    pub audit: audit::Audit,
     pub metrics: Arc<metrics::Metrics>,
 }
 
@@ -109,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         recorder,
         tts,
         mailer,
+        audit: audit::Audit::open(data_dir.join("audit"))?,
         metrics,
     });
     tts::spawn_worker(state.clone(), tts_rx);
@@ -153,6 +157,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/admin/users/import", post(api::import_users).layer(DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/api/admin/mail", get(api::get_mail).put(api::put_mail))
         .route("/api/admin/mail/test", post(api::test_mail))
+        .route("/api/admin/audit", get(api::audit_search))
+        .route("/api/admin/audit/:file", get(api::audit_csv))
         .route("/api/admin/events", get(api::list_events).post(api::create_event))
         .route("/api/admin/events/:id", patch(api::update_event).delete(api::delete_event))
         .route("/api/admin/users/bulk", post(api::bulk_users))

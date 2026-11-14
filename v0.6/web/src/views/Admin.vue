@@ -10,6 +10,7 @@ const tabs = [
   { id: 'events', label: 'イベント', icon: 'calendar' },
   { id: 'users', label: 'ユーザー', icon: 'user' },
   { id: 'mail', label: 'メール設定', icon: 'mail' },
+  { id: 'audit', label: '操作履歴', icon: 'file' },
   { id: 'server', label: 'サーバ', icon: 'server' },
 ]
 function tabKey(event, index) {
@@ -225,6 +226,7 @@ const importFile = ref(null)
 const importMail = ref(true)
 const imported = ref([])
 const importBusy = ref(false)
+const importError = ref('')
 
 /* CSV を文字列にする。UTF-8 で読めなければ Excel の既定（Shift_JIS）として読む */
 async function readCsv(file) {
@@ -276,10 +278,10 @@ async function sendTest() {
 }
 
 async function importCsv() {
-  error.value = notice.value = ''
+  error.value = notice.value = importError.value = ''
   const file = importFile.value?.files?.[0]
   if (!file) {
-    error.value = 'CSV ファイルを選んでください'
+    importError.value = 'CSV ファイルを選んでください'
     return
   }
   if (importBusy.value) return
@@ -295,7 +297,8 @@ async function importCsv() {
     importFile.value.value = ''
   } catch (e) {
     notice.value = ''
-    error.value = e.message
+    // エラーは CSV 欄の中にも出す（画面上部だけだと見落としやすい）
+    error.value = importError.value = `CSV を登録できませんでした: ${e.message}`
   } finally {
     importBusy.value = false
     await load()
@@ -446,6 +449,27 @@ async function resetPassword(u) {
     error.value = e.message
   }
 }
+
+/* 操作履歴（誰が・いつ・誰に・何をしたか） */
+const audit = ref({ entries: [], months: [] })
+const auditQuery = ref('')
+const auditBusy = ref(false)
+async function loadAudit() {
+  auditBusy.value = true
+  try {
+    audit.value = await api.get(`/api/admin/audit?limit=1000&q=${encodeURIComponent(auditQuery.value)}`)
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    auditBusy.value = false
+  }
+}
+/** そのユーザーに対する操作の履歴を開く（内部 ID で絞り込む） */
+function showAudit(u) {
+  auditQuery.value = u.id
+  activeTab.value = 'audit'
+}
+watch(activeTab, (t) => { if (t === 'audit') loadAudit() })
 
 onMounted(load)
 </script>
@@ -618,6 +642,7 @@ onMounted(load)
         </label>
         <button type="submit" :disabled="importBusy">{{ importBusy ? '登録中…' : '登録する' }}</button>
       </form>
+      <p v-if="importError" class="error" role="alert" style="margin-top: 10px">{{ importError }}</p>
       <div v-if="imported.length" class="table-wrap" style="margin-top: 12px">
         <table>
           <thead>
@@ -765,6 +790,10 @@ onMounted(load)
                   <button v-if="canRename(u)" type="button" class="secondary small rename-button" :aria-label="`${u.name} の名前・メールアドレスを変更`" title="名前・メールアドレスを変更" @click="editName(u)">変更</button>
                   <br /><span class="muted">{{ u.furigana }}</span>
                   <br v-if="u.email" /><span v-if="u.email" class="muted user-email">{{ u.email }}</span>
+                  <br /><span class="muted registered" :title="u.registered_by">
+                    登録: {{ u.registered_at ? u.registered_at.slice(0, 16) : '記録なし' }}{{ u.registered_by ? ' / ' + u.registered_by.split(' (')[0] : '' }}
+                  </span>
+                  <button type="button" class="link-button" :aria-label="`${u.display_id} ${u.name} の操作履歴`" @click="showAudit(u)">履歴</button>
                 </template>
               </td>
               <td>
@@ -926,6 +955,43 @@ onMounted(load)
       </aside>
     </div>
 
+    <div v-show="activeTab === 'audit'" id="panel-audit" class="panel audit-panel" role="tabpanel" aria-labelledby="tab-audit">
+      <h2>操作履歴</h2>
+      <p class="muted">
+        管理者の操作（ID 発行・CSV 登録・削除・無効化・パスワードリセット・権限・名前の変更・イベント・チャンネルなど）を記録しています。
+        「操作者」が操作した人です。ユーザー一覧の各人の「履歴」から、その人に対する操作だけを表示できます。
+      </p>
+      <form class="row" @submit.prevent="loadAudit">
+        <input v-model="auditQuery" type="search" class="grow" placeholder="ID・名前・内部 ID・操作（例: 0000-0002 / ID 発行 / 削除）で絞り込み" aria-label="操作履歴を絞り込む" />
+        <button type="submit" :disabled="auditBusy">検索</button>
+        <button v-if="auditQuery" type="button" class="secondary" @click="auditQuery = ''; loadAudit()">すべて表示</button>
+      </form>
+      <p class="muted" style="margin-top: 8px">
+        {{ audit.entries.length }} 件{{ audit.entries.length >= 1000 ? '（新しい 1000 件まで）' : '' }}
+        <template v-if="audit.months.length">／ CSV:
+          <a v-for="m in audit.months" :key="m" :href="`/api/admin/audit/${m}.csv`" download class="audit-month">{{ m }}</a>
+        </template>
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>日時</th><th>操作者</th><th>操作</th><th>対象</th><th>内容</th></tr>
+          </thead>
+          <tbody>
+            <tr v-if="!audit.entries.length"><td colspan="5" class="muted">記録はありません</td></tr>
+            <tr v-for="(e, i) in audit.entries" :key="i">
+              <td class="nowrap">{{ e.time }}</td>
+              <td class="nowrap">{{ e.actor_id }} {{ e.actor_name }}<template v-if="showInternal"><br /><span class="muted internal-id">{{ e.actor_uid }}</span></template></td>
+              <td class="nowrap" :class="{ 'audit-danger': e.action.includes('削除') || e.action.includes('失敗') }">{{ e.action }}</td>
+              <td class="nowrap">{{ e.target_id }} {{ e.target_name }}<template v-if="showInternal && e.target_uid"><br /><span class="muted internal-id">{{ e.target_uid }}</span></template></td>
+              <td>{{ e.detail }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <label class="check" style="margin-top: 8px"><input v-model="showInternal" type="checkbox" /> 内部 ID も表示</label>
+    </div>
+
     <div v-show="activeTab === 'server'" id="panel-server" class="panel server-panel" role="tabpanel" aria-labelledby="tab-server">
       <h2>サーバ情報 <span class="status-chip">参照のみ</span></h2>
       <template v-if="system">
@@ -966,6 +1032,12 @@ onMounted(load)
 .event-filter { width: auto; max-width: 260px; }
 .import-event { display: grid; gap: 4px; width: 100%; }
 .events-panel { grid-column: 1 / -1; }
+.audit-panel { grid-column: 1 / -1; }
+.audit-panel table { font-size: .85rem; }
+.audit-month { margin-left: 8px; }
+.audit-danger { color: #dc2626; font-weight: 600; }
+.registered { font-size: .78rem; }
+.link-button { background: none; border: 0; padding: 0 4px; color: var(--accent); text-decoration: underline; font-size: .78rem; min-height: 0; cursor: pointer; }
 .bulk-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 8%, transparent); position: sticky; top: 0; z-index: 2; }
 .bulk-channels { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding-top: 6px; }
 .danger-fill { background: #dc2626; border-color: #dc2626; color: #fff; }

@@ -7,6 +7,7 @@ use crate::users;
 use crate::radio::{ChannelDef, MAX_CHANNELS};
 use crate::tts::Voice;
 use crate::users::{random_token, AuthUser, LoginError, UserView, SUPERUSER_ID};
+use crate::audit::Target;
 use crate::AppState;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{FromRequestParts, Path, State};
@@ -226,7 +227,7 @@ pub async fn create_channel(
     Json(req): Json<CreateChannelReq>,
 ) -> ApiResult<Json<ChannelDef>> {
     let def = st.radio.create_channel(&req.name, req.max_speakers)?;
-    tracing::info!("チャンネル {} ({}) を作成 (by {})", def.name, def.id, admin.id);
+    st.audit.log(&admin, "チャンネル作成", None, &format!("{} {} / 発言枠 {}", def.id, def.name, def.max_speakers));
     // Janus のルームは参加時にも作るので、ここでの失敗は警告のみ
     let room = st.radio.room_of(def.id);
     if let Err(e) = st.janus.ensure_room(room, &def.name, st.cfg.audio.sampling_rate).await {
@@ -248,7 +249,7 @@ pub async fn update_channel(
     Json(req): Json<UpdateChannelReq>,
 ) -> ApiResult<Json<ChannelDef>> {
     let def = st.radio.update_channel(id, req.name.as_deref(), req.max_speakers)?;
-    tracing::info!("チャンネル {id} を変更 name={:?} max_speakers={:?} (by {})", req.name, req.max_speakers, admin.id);
+    st.audit.log(&admin, "チャンネル変更", None, &format!("{id} {} / 発言枠 {}", def.name, def.max_speakers));
     Ok(Json(def))
 }
 
@@ -259,7 +260,7 @@ pub async fn delete_channel(
 ) -> ApiResult<StatusCode> {
     let def = st.radio.delete_channel(id)?;
     st.users.forget_channel(id)?;
-    tracing::info!("チャンネル {} ({id}) を削除 (by {})", def.name, admin.id);
+    st.audit.log(&admin, "チャンネル削除", None, &format!("{id} {}", def.name));
     // ルームを破棄すると参加者に destroyed イベントが届き、各接続が受聴口を外す
     let room = st.radio.room_of(id);
     if let Err(e) = st.janus.destroy_room(room).await {
@@ -313,8 +314,9 @@ pub async fn create_user(
     AdminUser(admin): AdminUser,
     Json(req): Json<CreateUserReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (id, disp, password) = st.users.create_user(&req.event, &req.name, &req.furigana, &req.email)?;
-    tracing::info!("ID {}（内部 {}）を発行 (by {})", disp, id, admin.display_id);
+    let (id, disp, password) = st.users.create_user(&req.event, &req.name, &req.furigana, &req.email, &admin)?;
+    let detail = if req.email.trim().is_empty() { String::new() } else { format!("メール {}", req.email.trim()) };
+    st.audit.log(&admin, "ID 発行", Some(Target { uid: &id, id: &disp, name: req.name.trim() }), &detail);
     let mail = mail_password(&st, &disp, req.name.trim(), &req.email, &password, false, req.send_mail).await;
     Ok(Json(json!({ "id": id, "display_id": disp, "initial_password": password, "mail": mail })))
 }
@@ -353,8 +355,27 @@ pub async fn import_users(
     AdminUser(admin): AdminUser,
     Json(req): Json<ImportReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let rows = users::parse_import(&req.csv)?;
-    let created = st.users.create_users(&req.event, &rows)?;
+    // 失敗した理由をログにも残す（画面のエラー表示を見落としても、あとで確かめられるように）
+    let rows = users::parse_import(&req.csv).inspect_err(|e| st.audit.log(&admin, "CSV 登録（失敗）", None, &format!("{e:#}")))?;
+    let created = st
+        .users
+        .create_users(&req.event, &rows, &admin)
+        .inspect_err(|e| st.audit.log(&admin, "CSV 登録（失敗）", None, &format!("{e:#}")))?;
+    st.audit.log(
+        &admin,
+        "CSV 一括登録",
+        None,
+        &format!(
+            "{} 人: {}〜{}",
+            created.len(),
+            created.first().map(|c| c.1.as_str()).unwrap_or(""),
+            created.last().map(|c| c.1.as_str()).unwrap_or("")
+        ),
+    );
+    for (r, (id, disp, _)) in rows.iter().zip(&created) {
+        let detail = if r.email.trim().is_empty() { "CSV".to_string() } else { format!("CSV / メール {}", r.email.trim()) };
+        st.audit.log(&admin, "ID 発行", Some(Target { uid: id, id: disp, name: r.name.trim() }), &detail);
+    }
     tracing::info!(
         "CSV で {} 人を登録: {}〜{} (by {})",
         created.len(),
@@ -391,7 +412,7 @@ pub async fn put_mail(
     Json(req): Json<MailUpdate>,
 ) -> ApiResult<StatusCode> {
     st.mailer.update(req)?;
-    tracing::info!("メール設定を変更 (by {})", admin.id);
+    st.audit.log(&admin, "メール設定の変更", None, "");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -449,7 +470,14 @@ pub async fn update_user(
         st.sessions.remove_user(&id);
         st.radio.kick_user(&id, "この ID は管理者により無効化されました");
     }
-    tracing::info!("ID {} の権限を変更 admin={:?} disabled={:?} (by {})", st.users.display_of(&id), req.admin, req.disabled, admin.display_id);
+    let (tname, _) = st.users.contact(&id).unwrap_or_default();
+    let tdisp = st.users.display_of(&id);
+    if let Some(a) = req.admin {
+        st.audit.log(&admin, if a { "管理者の付与" } else { "管理者の解除" }, Some(Target { uid: &id, id: &tdisp, name: &tname }), "");
+    }
+    if let Some(d) = req.disabled {
+        st.audit.log(&admin, if d { "無効化" } else { "有効化" }, Some(Target { uid: &id, id: &tdisp, name: &tname }), "");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -477,10 +505,12 @@ pub async fn update_profile(
     let name = st.users.update_profile(&id, req.name.as_deref(), req.furigana.as_deref(), req.email.as_deref())?;
     st.radio.rename(&id, &name);
     let email = st.users.contact(&id).map(|(_, e)| e).unwrap_or_default();
+    let tdisp = st.users.display_of(&id);
+    let mut detail = format!("名前 {name}");
     if email != before {
-        tracing::info!("ID {id} のメールアドレスを変更: {before} → {email} (by {})", admin.id);
+        detail.push_str(&format!(" / メール {before} → {email}"));
     }
-    tracing::info!("ID {id} の名前を変更: {name} (by {})", admin.id);
+    st.audit.log(&admin, "名前・メールの変更", Some(Target { uid: &id, id: &tdisp, name: &name }), &detail);
     Ok(Json(serde_json::json!({ "id": id, "name": name, "email": email })))
 }
 
@@ -511,8 +541,8 @@ pub async fn reset_password(
     st.sessions.remove_user(&id);
     st.radio.kick_user(&id, "パスワードがリセットされたため、もう一度ログインしてください");
     let disp = st.users.display_of(&id);
-    tracing::info!("ID {} のパスワードをリセット (by {})", disp, admin.display_id);
     let (name, email) = st.users.contact(&id).unwrap_or_default();
+    st.audit.log(&admin, "パスワードリセット", Some(Target { uid: &id, id: &disp, name: &name }), "");
     let mail = mail_password(&st, &disp, &name, &email, &password, true, req.send_mail).await;
     Ok(Json(json!({ "id": id, "display_id": disp, "initial_password": password, "mail": mail })))
 }
@@ -558,7 +588,13 @@ pub async fn set_user_channels(
     };
     st.users.set_channels(&id, channels.clone())?;
     st.radio.set_access(&id, channels.clone());
-    tracing::info!("ID {id} の使えるチャンネルを変更 {:?} (by {})", channels, admin.id);
+    let (tname, _) = st.users.contact(&id).unwrap_or_default();
+    st.audit.log(
+        &admin,
+        "使えるチャンネルの変更",
+        Some(Target { uid: &id, id: &st.users.display_of(&id), name: &tname }),
+        &channels.as_ref().map(|c| format!("{c:?}")).unwrap_or_else(|| "すべて".into()),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -778,7 +814,24 @@ pub async fn bulk_users(
         results.extend(task.await.map_err(|e| ApiError::from(anyhow::anyhow!("メール送信の処理が異常終了しました: {e}")))?);
     }
     let done = results.iter().filter(|r| r["result"] == "ok").count();
-    tracing::info!("一括操作 {}: {done} 人 / 選択 {} 人 (by {})", req.action, req.ids.len(), admin.display_id);
+    let label = match req.action.as_str() {
+        "delete" => "削除",
+        "disable" => "無効化",
+        "enable" => "有効化",
+        "reset" => "パスワードリセット",
+        "admin_on" => "管理者の付与",
+        "admin_off" => "管理者の解除",
+        _ => "使えるチャンネルの変更",
+    };
+    for r in results.iter().filter(|r| r["result"] == "ok") {
+        let s = |k: &str| r[k].as_str().unwrap_or("").to_string();
+        let detail = if req.action == "channels" {
+            format!("一括 / {}", req.channels.as_ref().map(|c| format!("{c:?}")).unwrap_or_else(|| "すべて".into()))
+        } else {
+            "一括".to_string()
+        };
+        st.audit.log(&admin, label, Some(Target { uid: &s("id"), id: &s("display_id"), name: &s("name") }), &detail);
+    }
     Ok(Json(json!({ "action": req.action, "done": done, "results": results, "gaps": st.users.gaps() })))
 }
 
@@ -798,7 +851,11 @@ pub async fn renumber_users(
     for (id, _, new) in &changed {
         st.radio.set_display(id, new);
     }
-    tracing::info!("表示用 ID を詰め直し: {} 人の ID が変更 (by {})", changed.len(), admin.display_id);
+    st.audit.log(&admin, "番号を詰める", None, &format!("イベント {} / {} 人の ID が変更", req.event, changed.len()));
+    for (id, old, new) in &changed {
+        let (tname, _) = st.users.contact(id).unwrap_or_default();
+        st.audit.log(&admin, "ID の変更（番号を詰める）", Some(Target { uid: id, id: new, name: &tname }), &format!("{old} → {new}"));
+    }
     let list: Vec<_> = changed
         .iter()
         .map(|(id, old, new)| {
@@ -827,7 +884,7 @@ pub async fn create_event(
     Json(req): Json<EventReq>,
 ) -> ApiResult<Json<users::Event>> {
     let ev = st.users.create_event(&req.id, &req.name)?;
-    tracing::info!("イベント {} ({}) を登録 (by {})", ev.id, ev.name, admin.display_id);
+    st.audit.log(&admin, "イベント登録", None, &format!("{} {}", ev.id, ev.name));
     Ok(Json(ev))
 }
 
@@ -838,14 +895,47 @@ pub async fn update_event(
     Json(req): Json<EventReq>,
 ) -> ApiResult<StatusCode> {
     st.users.rename_event(&id, &req.name)?;
-    tracing::info!("イベント {id} の名前を変更: {} (by {})", req.name.trim(), admin.display_id);
+    st.audit.log(&admin, "イベント名の変更", None, &format!("{id} {}", req.name.trim()));
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn delete_event(State(st): State<Arc<AppState>>, AdminUser(admin): AdminUser, Path(id): Path<String>) -> ApiResult<StatusCode> {
     st.users.delete_event(&id)?;
-    tracing::info!("イベント {id} を削除 (by {})", admin.display_id);
+    st.audit.log(&admin, "イベント削除", None, &id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct AuditQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// 操作履歴（新しい順）。q で絞り込み（ID・名前・内部 ID・操作など）
+pub async fn audit_search(
+    State(st): State<Arc<AppState>>,
+    _: AdminUser,
+    axum::extract::Query(q): axum::extract::Query<AuditQuery>,
+) -> Json<serde_json::Value> {
+    let limit = q.limit.unwrap_or(500).clamp(1, 5000);
+    Json(json!({ "entries": st.audit.search(&q.q, limit), "months": st.audit.months() }))
+}
+
+/// 操作履歴の CSV（月ごと）をダウンロード
+pub async fn audit_csv(State(st): State<Arc<AppState>>, _: AdminUser, Path(file): Path<String>) -> ApiResult<Response> {
+    let month = file.strip_suffix(".csv").unwrap_or(&file);
+    let path = st.audit.file_of(month).ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "その月の操作履歴はありません".into()))?;
+    let body = std::fs::read(&path).map_err(|e| ApiError::bad(e.to_string()))?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"macross_audit_{month}.csv\"")),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 pub async fn auth_admin(_: AdminUser) -> StatusCode {

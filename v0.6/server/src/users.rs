@@ -37,6 +37,9 @@ pub struct UserRow {
     pub furigana: String,
     pub email: String,
     pub initial_password: String,
+    /// 登録日時・登録者（「0000-0002 前田旺佑 (内部 ID)」）。以前からの ID は空
+    pub registered_at: String,
+    pub registered_by: String,
 }
 
 impl UserRow {
@@ -57,6 +60,11 @@ impl UserRow {
     fn shown(&self) -> String {
         show_key(&self.display)
     }
+}
+
+/// 登録者の記録（「0000-0002 前田旺佑 (de3d0dd6) / CSV 一括登録」）
+fn registrant(by: &AuthUser, how: &str) -> String {
+    format!("{} {} ({}) / {how}", by.display_id, by.name, by.id)
 }
 
 /// [イベント ID][表示 ID] の 8 桁を 0001-0012 の形にする
@@ -95,6 +103,10 @@ struct CsvRow {
     pub email: String,
     #[serde(rename = "初期パスワード")]
     pub initial_password: String,
+    #[serde(rename = "登録日時", default)]
+    pub registered_at: String,
+    #[serde(rename = "登録者", default)]
+    pub registered_by: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -156,6 +168,9 @@ pub struct UserView {
     pub channels: Option<Vec<u32>>,
     /// 初期パスワード（本人が変更するまで管理画面で確認できる）
     pub initial_password: Option<String>,
+    /// 登録日時・登録者
+    pub registered_at: String,
+    pub registered_by: String,
 }
 
 struct Inner {
@@ -233,6 +248,8 @@ impl UserStore {
                 furigana: r.furigana,
                 email: r.email,
                 initial_password: r.initial_password,
+                registered_at: r.registered_at,
+                registered_by: r.registered_by,
             });
         }
         if !migrated.is_empty() {
@@ -287,6 +304,8 @@ impl UserStore {
                     furigana: su.furigana.trim().into(),
                     email: su.email.trim().into(),
                     initial_password: password.clone(),
+                    registered_at: crate::radio::now_jst().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    registered_by: "（サーバの初回起動）".into(),
                 },
             );
             created = Some((SUPERUSER_ID.to_string(), password));
@@ -317,10 +336,12 @@ impl UserStore {
                 furigana: r.furigana.clone(),
                 email: r.email.clone(),
                 initial_password: r.initial_password.clone(),
+                registered_at: r.registered_at.clone(),
+                registered_by: r.registered_by.clone(),
             })?;
         }
         if inner.rows.is_empty() {
-            wtr.write_record(["ID", "名前", "ふりがな", "メールアドレス", "初期パスワード"])?;
+            wtr.write_record(["ID", "名前", "ふりがな", "メールアドレス", "初期パスワード", "登録日時", "登録者"])?;
         }
         let bytes = wtr.into_inner().map_err(|e| anyhow!(e.to_string()))?;
         write_atomic(&self.csv_path, &bytes)?;
@@ -474,7 +495,7 @@ impl UserStore {
     }
 
     /// イベントの中で ID を自動発行してユーザを作成。(内部 ID, ログイン ID, 初期パスワード) を返す
-    pub fn create_user(&self, event: &str, name: &str, furigana: &str, email: &str) -> anyhow::Result<(String, String, String)> {
+    pub fn create_user(&self, event: &str, name: &str, furigana: &str, email: &str, by: &AuthUser) -> anyhow::Result<(String, String, String)> {
         let name = check_person_name(name)?;
         let name = name.as_str();
         check_email(email)?;
@@ -490,6 +511,8 @@ impl UserStore {
             furigana: furigana.trim().to_string(),
             email: email.trim().to_string(),
             initial_password: password.clone(),
+            registered_at: crate::radio::now_jst().format("%Y-%m-%d %H:%M:%S").to_string(),
+            registered_by: registrant(by, "ID 発行"),
         });
         inner.creds.insert(id.clone(), Credential::default());
         self.save(&inner)?;
@@ -498,7 +521,7 @@ impl UserStore {
 
     /// 複数のユーザをまとめて作成（CSV 一括登録）。先に全員を検証し、1 回の保存で全員を登録する
     /// （途中で止まって一部だけ登録される、ということが起きない）。(内部 ID, ログイン ID, 初期パスワード) を行の順に返す
-    pub fn create_users(&self, event: &str, rows: &[ImportRow]) -> anyhow::Result<Vec<(String, String, String)>> {
+    pub fn create_users(&self, event: &str, rows: &[ImportRow], by: &AuthUser) -> anyhow::Result<Vec<(String, String, String)>> {
         let mut checked = Vec::with_capacity(rows.len());
         let mut errors = vec![];
         for (i, r) in rows.iter().enumerate() {
@@ -515,6 +538,7 @@ impl UserStore {
         let free = 9999 - inner.rows.iter().filter(|r| r.event() == event).filter_map(|r| r.number().parse::<usize>().ok()).max().unwrap_or(0);
         anyhow::ensure!(rows.len() <= free, "イベント {event} に登録できるのはあと {free} 人です（表示 ID は 4 桁まで）");
         let mut out = Vec::with_capacity(rows.len());
+        let now = crate::radio::now_jst().format("%Y-%m-%d %H:%M:%S").to_string();
         for (r, name) in rows.iter().zip(checked) {
             let display = next_display(&inner.rows, &event)?;
             let id = new_internal_id(&inner.rows);
@@ -526,6 +550,8 @@ impl UserStore {
                 furigana: r.furigana.trim().to_string(),
                 email: r.email.trim().to_string(),
                 initial_password: password.clone(),
+                registered_at: now.clone(),
+                registered_by: registrant(by, "CSV 一括登録"),
             });
             inner.creds.insert(id.clone(), Credential::default());
             out.push((id, show_key(&display), password));
@@ -689,6 +715,8 @@ impl UserStore {
                     channels: if c.admin || r.superuser() { None } else { c.channels.clone() },
                     initial_password: (c.password_hash.is_none() && !r.initial_password.is_empty())
                         .then(|| r.initial_password.clone()),
+                    registered_at: r.registered_at.clone(),
+                    registered_by: r.registered_by.clone(),
                 }
             })
             .collect()
@@ -759,26 +787,65 @@ fn check_email(email: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// CSV を読み、全行を検証してから返す（1 行でも不正なら何も登録しない）
+/// 全角の英数字・記号を半角にする（メールアドレス・列名用）
+fn to_half(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            '\u{3000}' => ' ',
+            _ => c,
+        })
+        .collect()
+}
+
+/// 列名をそろえる（空白・記号を除き、半角・小文字にする）
+fn header_key(h: &str) -> String {
+    to_half(h).to_lowercase().chars().filter(|c| !c.is_whitespace() && !"()（）[]【】*＊:：_-".contains(*c)).collect()
+}
+
+const NAME_HEADERS: [&str; 7] = ["名前", "氏名", "なまえ", "name", "fullname", "お名前", "名前漢字"];
+const FURI_HEADERS: [&str; 7] = ["ふりがな", "フリガナ", "よみがな", "ヨミガナ", "かな", "furigana", "kana"];
+const MAIL_HEADERS: [&str; 8] = ["メールアドレス", "メール", "mail", "email", "emailaddress", "mailaddress", "e-mail", "アドレス"];
+
+/// CSV を読み、全行を検証してから返す（1 行でも不正なら何も登録しない）。
+/// 列名は「名前／氏名」「ふりがな／フリガナ」「メールアドレス／メール／email」などを受け付け、
+/// 列名の行より上にあるタイトル行は読み飛ばす。区切りはカンマ・タブのどちらでもよい
 pub fn parse_import(text: &str) -> anyhow::Result<Vec<ImportRow>> {
     let text = text.trim_start_matches('\u{feff}');
-    let mut rdr = csv::ReaderBuilder::new().flexible(true).trim(csv::Trim::All).from_reader(text.as_bytes());
-    let headers = rdr.headers()?.clone();
-    let col = |names: &[&str]| headers.iter().position(|h| names.contains(&h));
-    let name_col = col(&["名前", "name"]).ok_or_else(|| anyhow!("「名前」列がありません（テンプレートを使ってください）"))?;
-    let furi_col = col(&["ふりがな", "furigana"]);
-    let mail_col = col(&["メールアドレス", "email"]);
+    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let delim = if first.contains('\t') && !first.contains(',') { b'\t' } else { b',' };
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .delimiter(delim)
+        .from_reader(text.as_bytes());
+    let mut records = vec![];
+    for (i, rec) in rdr.records().enumerate() {
+        records.push(rec.with_context(|| format!("{} 行目を読めません", i + 1))?);
+    }
+    // 列名の行を探す（先頭 10 行まで）
+    let is = |h: &str, names: &[&str]| names.iter().any(|n| header_key(n) == header_key(h));
+    let header_at = records.iter().take(10).position(|r| r.iter().any(|h| is(h, &NAME_HEADERS)));
+    let Some(header_at) = header_at else {
+        let got = records.first().map(|r| r.iter().collect::<Vec<_>>().join(", ")).unwrap_or_default();
+        bail!("「名前」の列が見つかりません。1 行目に「名前,ふりがな,メールアドレス」の列名を書いてください（テンプレートを使うと確実です）。読み込んだ 1 行目: {got}");
+    };
+    let headers = &records[header_at];
+    let col = |names: &[&str]| headers.iter().position(|h| is(h, names));
+    let name_col = col(&NAME_HEADERS);
+    let furi_col = col(&FURI_HEADERS);
+    let mail_col = col(&MAIL_HEADERS);
     let mut rows = vec![];
     let mut errors = vec![];
-    for (i, rec) in rdr.records().enumerate() {
-        let line = i + 2;
-        let rec = rec.with_context(|| format!("{line} 行目を読めません"))?;
+    for (i, rec) in records.iter().enumerate().skip(header_at + 1) {
+        let line = i + 1;
         let get = |c: Option<usize>| c.and_then(|c| rec.get(c)).unwrap_or("").to_string();
-        let name = get(Some(name_col));
+        let name = get(name_col);
         if rec.iter().all(|f| f.is_empty()) || name.starts_with(IMPORT_EXAMPLE_PREFIX) {
             continue;
         }
-        let email = get(mail_col);
+        let email = to_half(&get(mail_col)).trim().to_string();
         if let Err(e) = check_person_name(&name) {
             errors.push(format!("{line} 行目: {e}"));
         }
