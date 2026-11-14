@@ -62,7 +62,7 @@ pub struct LimitsCfg {
 
 impl Default for LimitsCfg {
     fn default() -> Self {
-        Self { max_connections: 30 }
+        Self { max_connections: 100 }
     }
 }
 

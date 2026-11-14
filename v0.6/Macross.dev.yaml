@@ -8,7 +8,7 @@ server:
   cookie_secure: false
 
 limits:
-  max_connections: 30
+  max_connections: 100
 
 channels:
   room_base: 1001

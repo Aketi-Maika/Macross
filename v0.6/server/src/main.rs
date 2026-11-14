@@ -18,6 +18,7 @@ mod tts;
 mod users;
 
 use anyhow::Context;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, patch, post, put};
 use axum::Router;
 use std::path::PathBuf;
@@ -67,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(&dir).with_context(|| format!("フォルダを作成できません: {}", dir.display()))?;
     }
 
-    let (users, bootstrap) = users::UserStore::open(&cfg.server.data_dir, &cfg.superuser)?;
+    let (users, bootstrap, migrated) = users::UserStore::open(&cfg.server.data_dir, &cfg.superuser)?;
     if let Some((id, pw)) = bootstrap {
         tracing::warn!("スーパーユーザーを作成しました ID={id} 初期パスワード={pw}（初回ログイン時に変更してください）");
     }
@@ -93,6 +94,8 @@ async fn main() -> anyhow::Result<()> {
     let metrics_listen = cfg.server.metrics_listen.clone();
     let geocoder = geocode::Geocoder::new(&cfg.location);
     let sessions = sessions::Sessions::open(data_dir.join("sessions.json"), cfg.server.session_days);
+    // ID を 16 桁に変換したときは、ログインしたままになるようセッションを付け替える
+    sessions.rekey(&migrated);
     let mailer = mail::Mailer::open(data_dir.join("mail.json"), &cfg.mail);
     let state = Arc::new(AppState {
         cfg,
@@ -146,9 +149,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/admin/channels/:id", patch(api::update_channel).delete(api::delete_channel))
         .route("/api/admin/users", get(api::list_users).post(api::create_user))
         .route("/api/admin/users/template.csv", get(api::users_template))
-        .route("/api/admin/users/import", post(api::import_users))
+        // CSV 一括登録は人数の上限なし（既定の 2MB を超える大きな CSV も受け付ける）
+        .route("/api/admin/users/import", post(api::import_users).layer(DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/api/admin/mail", get(api::get_mail).put(api::put_mail))
         .route("/api/admin/mail/test", post(api::test_mail))
+        .route("/api/admin/users/bulk", post(api::bulk_users))
+        .route("/api/admin/users/renumber", post(api::renumber_users))
         .route("/api/admin/users/:id", patch(api::update_user))
         .route("/api/admin/users/:id/reset-password", post(api::reset_password))
         .route("/api/admin/users/:id/channels", put(api::set_user_channels))
@@ -200,8 +206,8 @@ fn spawn_room_setup(st: Arc<AppState>) {
 /// 0000 のパスワードを忘れたとき用。新しい初期パスワードを表示する
 /// （サーバが動いているとメモリ上の古い状態で上書きされるため、停止中に実行する）
 fn reset_superuser(cfg: &config::Config) -> anyhow::Result<()> {
-    let (users, _) = users::UserStore::open(&cfg.server.data_dir, &cfg.superuser)?;
-    let pw = users.reset_password(users::SUPERUSER_ID)?;
+    let (users, _, _) = users::UserStore::open(&cfg.server.data_dir, &cfg.superuser)?;
+    let pw = users.reset_password(&users.superuser_id())?;
     println!("スーパーユーザー（{}）の新しい初期パスワード: {pw}", users::SUPERUSER_ID);
     println!("ログイン後にパスワードの変更を求められます。");
     Ok(())

@@ -38,7 +38,7 @@ async function onLogout() {
       <a v-if="session.user.admin" class="nav-pc" :href="grafanaUrl" target="_blank" rel="noopener" title="Grafanaを新しいタブで開く"><UiIcon name="monitor" />監視<span class="external-mark" aria-label="新しいタブ">↗</span></a>
     </nav>
     <details v-if="session.user" class="account-menu">
-      <summary><UiIcon name="user" /><span>{{ session.user.name }} <span class="account-id">({{ session.user.id }})</span></span><span aria-hidden="true">⌄</span></summary>
+      <summary><UiIcon name="user" /><span>{{ session.user.name }} <span class="account-id">({{ session.user.display_id ?? session.user.id }})</span></span><span aria-hidden="true">⌄</span></summary>
       <div class="account-popover">
         <span class="account-role">{{ session.user.superuser ? 'スーパーユーザー' : session.user.admin ? '管理者' : '一般ユーザー' }}</span>
         <router-link to="/password" @click="$event.currentTarget.closest('details').removeAttribute('open')"><UiIcon name="lock" />パスワード変更</router-link>

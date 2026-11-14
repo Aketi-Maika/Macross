@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { api, session } from '../api.js'
 import UiIcon from '../components/UiIcon.vue'
 import ChannelBadge from '../components/ChannelBadge.vue'
@@ -24,11 +24,112 @@ const maxChannels = ref(9)
 const maxConnections = ref(30)
 const newChannel = ref({ name: '', max_speakers: 1 })
 const users = ref([])
+
+/* ユーザー一覧の検索（名前・ふりがな・ID・メールアドレス。全角半角・カタカナひらがな・空白・大文字小文字を区別しない） */
+const userQuery = ref('')
+function normalize(t) {
+  return String(t ?? '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60))
+    .replace(/\s+/g, '')
+}
+const filteredUsers = computed(() => {
+  const words = userQuery.value.normalize('NFKC').split(/\s+/).map(normalize).filter(Boolean)
+  if (!words.length) return users.value
+  return users.value.filter((u) => {
+    const hay = normalize([u.display_id, Number(u.display_id), u.name, u.furigana, u.email, showInternal.value ? u.uid : ''].join(' '))
+    return words.every((w) => hay.includes(w))
+  })
+})
 const error = ref('')
 const notice = ref('')
 const system = ref(null)
-const SUPERUSER = '0000'
 const isSuper = () => !!session.user?.superuser
+
+/* 内部用 ID の表示（ボタンで切り替え。既定は隠す） */
+const showInternal = ref(false)
+
+/* 一括操作: 選んだユーザー（内部用 ID → true） */
+const selected = reactive({})
+const selectable = (u) => !u.superuser && u.id !== session.user?.id
+const selectedUsers = computed(() => users.value.filter((u) => selected[u.id]))
+const allShownSelected = computed(() => {
+  const list = filteredUsers.value.filter(selectable)
+  return list.length > 0 && list.every((u) => selected[u.id])
+})
+function toggleAll(on) {
+  for (const u of filteredUsers.value.filter(selectable)) {
+    if (on) selected[u.id] = true
+    else delete selected[u.id]
+  }
+}
+function clearSelection() {
+  for (const k of Object.keys(selected)) delete selected[k]
+}
+const bulkBusy = ref(false)
+const bulkChannels = ref({ open: false, all: true, ids: [] })
+const bulkResult = ref(null)
+const ACTION_LABEL = {
+  delete: '削除',
+  disable: '無効化',
+  enable: '有効化',
+  reset: 'パスワードリセット',
+  admin_on: '管理者の付与',
+  admin_off: '管理者の解除',
+  channels: '使えるチャンネルの設定',
+}
+
+async function bulk(action) {
+  const list = selectedUsers.value
+  if (!list.length) return
+  const names = list.slice(0, 8).map((u) => `${u.display_id} ${u.name}`).join('\n') + (list.length > 8 ? `\n…ほか ${list.length - 8} 人` : '')
+  const extra = {
+    delete: '\n\n削除すると元に戻せません（録音・位置の記録は残ります）。ログイン中の人は切断されます。\n表示用 ID の欠番は「番号を詰める」で付け直せます。',
+    disable: '\n\nログイン中の人は切断されます。',
+    reset: '\n\n新しい初期パスワードを発行し、ログイン中の人はログアウトさせます。',
+  }[action] ?? ''
+  if (!confirm(`${list.length} 人を${ACTION_LABEL[action]}しますか？\n\n${names}${extra}`)) return
+  if (action === 'delete' && list.length >= 5 && prompt(`確認のため、削除する人数（${list.length}）を入力してください`) !== String(list.length)) return
+  error.value = notice.value = ''
+  bulkBusy.value = true
+  try {
+    const body = { ids: list.map((u) => u.id), action }
+    if (action === 'reset') body.send_mail = resetMail.value && mailEnabled.value
+    if (action === 'channels') body.channels = bulkChannels.value.all ? null : bulkChannels.value.ids
+    const r = await api.post('/api/admin/users/bulk', body)
+    const skipped = r.results.filter((x) => x.result !== 'ok')
+    notice.value = `${r.done} 人を${ACTION_LABEL[action]}しました` + (skipped.length ? `（対象外 ${skipped.length} 人。下の結果を確認してください）` : '')
+    bulkResult.value = action === 'reset' || skipped.length ? { action, results: r.results } : null
+    if (action === 'reset') for (const x of r.results) if (x.initial_password) shown[x.id] = true
+    bulkChannels.value.open = false
+    clearSelection()
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    bulkBusy.value = false
+    await load()
+  }
+}
+
+/* 表示用 ID の欠番（削除でできる）。ボタンで 1, 2, 3… に詰め直す */
+const gaps = computed(() => {
+  const max = Math.max(0, ...users.value.map((u) => Number(u.display_id) || 0))
+  return Math.max(0, max + 1 - users.value.length)
+})
+const renumbered = ref([])
+async function renumber() {
+  if (!confirm(`表示用 ID を 1, 2, 3… の連番に詰め直しますか？（欠番 ${gaps.value}）\n\n欠番より後ろの人はログイン ID が変わります（パスワード・記録はそのまま）。\n変わった人の一覧を表示しますので、本人に新しい ID を伝えてください。`)) return
+  error.value = notice.value = ''
+  try {
+    const r = await api.post('/api/admin/users/renumber', {})
+    renumbered.value = r.changed
+    notice.value = r.changed.length ? `${r.changed.length} 人の ID を付け直しました（下の一覧を確認してください）` : '欠番はありません'
+    await load()
+  } catch (e) {
+    error.value = e.message
+  }
+}
 
 /* ユーザごとの使えるチャンネル（編集中のユーザ ID → { all, ids }） */
 const editing = reactive({})
@@ -49,7 +150,7 @@ async function saveChannels(u) {
   const e = editing[u.id]
   try {
     await api.put(`/api/admin/users/${u.id}/channels`, { all: e.all, channels: e.all ? [] : e.ids })
-    notice.value = `${u.name}（${u.id}）の使えるチャンネルを保存しました（接続中なら すぐに反映されます）`
+    notice.value = `${u.name}（${u.display_id}）の使えるチャンネルを保存しました（接続中なら すぐに反映されます）`
     delete editing[u.id]
     await load()
   } catch (err) {
@@ -60,10 +161,10 @@ async function saveChannels(u) {
 /* 名前・メールアドレスの編集（編集中のユーザ ID → { name, furigana, email }） */
 const renaming = reactive({})
 
-/** 名前を変えられるか: 自分・一般ユーザは admin、0000 と他の admin はスーパーユーザーだけ */
+/** 名前を変えられるか: 自分・一般ユーザは admin、スーパーユーザーと他の admin はスーパーユーザーだけ */
 function canRename(u) {
   if (u.id === session.user?.id) return true
-  if (u.id === SUPERUSER) return isSuper()
+  if (u.superuser) return isSuper()
   return isSuper() || !u.admin
 }
 
@@ -81,7 +182,7 @@ async function saveName(u) {
   try {
     const res = await api.put(`/api/admin/users/${u.id}/profile`, { name: r.name, furigana: r.furigana, email: r.email })
     const mailChanged = (u.email ?? '') !== res.email
-    notice.value = `${u.id} の${mailChanged ? '名前・メールアドレス' : '名前'}を保存しました（${res.name}${res.email ? ' / ' + res.email : ''}）`
+    notice.value = `${u.display_id} の${mailChanged ? '名前・メールアドレス' : '名前'}を保存しました（${res.name}${res.email ? ' / ' + res.email : ''}）`
     delete renaming[u.id]
     if (u.id === session.user?.id && session.user) session.user.name = res.name
     await load()
@@ -92,7 +193,7 @@ async function saveName(u) {
 
 /** 他の admin の操作はスーパーユーザーだけ */
 function canManage(u) {
-  if (u.id === SUPERUSER || u.id === session.user?.id) return false
+  if (u.superuser || u.id === session.user?.id) return false
   return isSuper() || !u.admin
 }
 
@@ -113,6 +214,17 @@ const PORTS = { starttls: 587, tls: 465, none: 25 }
 const importFile = ref(null)
 const importMail = ref(true)
 const imported = ref([])
+const importBusy = ref(false)
+
+/* CSV を文字列にする。UTF-8 で読めなければ Excel の既定（Shift_JIS）として読む */
+async function readCsv(file) {
+  const buf = await file.arrayBuffer()
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf)
+  } catch {
+    return new TextDecoder('shift_jis').decode(buf)
+  }
+}
 const resetMail = ref(true)
 
 function mailResult(m) {
@@ -160,15 +272,23 @@ async function importCsv() {
     error.value = 'CSV ファイルを選んでください'
     return
   }
+  if (importBusy.value) return
+  importBusy.value = true
+  const sendMail = importMail.value && mailEnabled.value
+  notice.value = sendMail ? '登録してメールを送っています…（人数が多いと時間がかかります。この画面のままお待ちください）' : '登録しています…'
   try {
-    const csv = await file.text()
-    const r = await api.post('/api/admin/users/import', { csv, send_mail: importMail.value && mailEnabled.value })
+    const csv = await readCsv(file)
+    const r = await api.post('/api/admin/users/import', { csv, send_mail: sendMail })
     imported.value = r.users
-    notice.value = `${r.users.length} 人を登録しました`
+    const failed = r.users.filter((u) => u.mail !== 'sent' && u.mail !== 'skipped').length
+    notice.value = `${r.users.length} 人を登録しました（${r.users[0]?.display_id}〜${r.users[r.users.length - 1]?.display_id}）` + (failed ? `。メールを送れなかった人が ${failed} 人います（下の表を確認してください）` : '')
     importFile.value.value = ''
-    await load()
   } catch (e) {
+    notice.value = ''
     error.value = e.message
+  } finally {
+    importBusy.value = false
+    await load()
   }
 }
 
@@ -255,14 +375,14 @@ async function setFlag(u, key, value) {
 const shown = reactive({})
 
 async function resetPassword(u) {
-  if (!confirm(`${u.name}（${u.id}）のパスワードをリセットしますか？\n新しい初期パスワードを発行し、ログイン中の場合はログアウトさせます。`)) return
+  if (!confirm(`${u.name}（${u.display_id}）のパスワードをリセットしますか？\n新しい初期パスワードを発行し、ログイン中の場合はログアウトさせます。`)) return
   error.value = notice.value = ''
   try {
     const r = await api.post(`/api/admin/users/${u.id}/reset-password`, {
       send_mail: resetMail.value && mailEnabled.value && !!u.email,
     })
     const m = mailResult(r.mail)
-    notice.value = `${u.name}（${u.id}）の新しい初期パスワード: ${r.initial_password}（${m || '本人に伝えてください'}。次回ログイン時に変更を求められます）`
+    notice.value = `${u.name}（${u.display_id}）の新しい初期パスワード: ${r.initial_password}（${m || '本人に伝えてください'}。次回ログイン時に変更を求められます）`
     await load()
     shown[u.id] = true
   } catch (e) {
@@ -348,7 +468,7 @@ onMounted(load)
         <div style="margin-top: 12px"><button type="submit">発行する</button></div>
       </form>
       <div v-if="issued" class="issued">
-        {{ issued.name }} さんの ID <code>{{ issued.id }}</code> 初期パスワード
+        {{ issued.name }} さんの ID <code>{{ issued.display_id }}</code> 初期パスワード
         <code>{{ issued.initial_password }}</code>
         <p v-if="issued.mail === 'sent'" class="muted">メールで送信しました。初回ログイン時に変更を求められます。</p>
         <p v-else-if="mailResult(issued.mail)" class="error">{{ mailResult(issued.mail) }}（本人に直接伝えてください）</p>
@@ -361,7 +481,7 @@ onMounted(load)
       <h2>CSV で一括登録</h2>
       <p class="muted">
         テンプレートに「名前・ふりがな・メールアドレス」を記入して読み込みます。ID と初期パスワードは自動で発行されます。
-        「（例）」で始まる行は登録されません。1 行でも誤りがあると何も登録しません。
+        「（例）」で始まる行は登録されません。人数の上限はなく、全行に ID を発行します。1 行でも誤りがあると何も登録しません。
       </p>
       <div class="row">
         <a class="button-link outline" href="/api/admin/users/template.csv" download><UiIcon name="download" />テンプレートをダウンロード</a>
@@ -372,7 +492,7 @@ onMounted(load)
           <input v-model="importMail" type="checkbox" :disabled="!mailEnabled" />
           初期パスワードをメールで送る
         </label>
-        <button type="submit">登録する</button>
+        <button type="submit" :disabled="importBusy">{{ importBusy ? '登録中…' : '登録する' }}</button>
       </form>
       <div v-if="imported.length" class="table-wrap" style="margin-top: 12px">
         <table>
@@ -381,7 +501,7 @@ onMounted(load)
           </thead>
           <tbody>
             <tr v-for="u in imported" :key="u.id">
-              <td>{{ u.id }}</td>
+              <td>{{ u.display_id }}</td>
               <td>{{ u.name }}</td>
               <td>{{ u.email }}</td>
               <td><code>{{ u.initial_password }}</code></td>
@@ -398,7 +518,7 @@ onMounted(load)
     <div v-show="activeTab === 'users'" id="panel-users" class="panel users-panel" role="tabpanel" aria-labelledby="tab-users">
       <h2>ユーザー一覧</h2>
       <p class="muted">
-        ID 0000 はスーパーユーザー（最上位。無効化・権限の解除はできません）。admin の付与・解除と、他の admin の無効化・パスワードリセットはスーパーユーザーだけができます。
+        ID 00000000 はスーパーユーザー（最上位。無効化・権限の解除・削除はできません）。左のチェックで選んだ人に、削除・無効化などをまとめて行えます。admin の付与・解除と、他の admin の無効化・パスワードリセットはスーパーユーザーだけができます。
         「使えるチャンネル」で一般ユーザが聴ける・話せるチャンネルを制限できます（admin は常にすべて）。
         名前の横の「変更」で名前・ふりがな・メールアドレスを変えられます（録音の記録には、話した時点の名前が残ります）。
       </p>
@@ -406,10 +526,67 @@ onMounted(load)
         <input v-model="resetMail" type="checkbox" :disabled="!mailEnabled" />
         パスワードリセット時に新しい初期パスワードをメールで送る（メールアドレス登録済みの人のみ）
       </label>
+      <div class="user-search">
+        <input v-model="userQuery" type="search" placeholder="名前・ふりがな・ID・メールで検索" aria-label="ユーザーを検索" />
+        <span class="muted">{{ userQuery.trim() ? `${filteredUsers.length} / ${users.length} 人` : `${users.length} 人` }}</span>
+        <span class="grow"></span>
+        <button type="button" class="secondary small" :aria-pressed="showInternal" @click="showInternal = !showInternal">
+          {{ showInternal ? '内部 ID を隠す' : '内部 ID を表示' }}
+        </button>
+        <button v-if="gaps" type="button" class="secondary small" title="削除でできた欠番を詰めて、表示用 ID を 1, 2, 3… の連番にします" @click="renumber">
+          番号を詰める（欠番 {{ gaps }}）
+        </button>
+      </div>
+      <div v-if="selectedUsers.length" class="bulk-bar" role="region" aria-label="選択したユーザーへの一括操作">
+        <strong>{{ selectedUsers.length }} 人を選択中</strong>
+        <button type="button" class="secondary small" :disabled="bulkBusy" @click="bulk('disable')">無効化</button>
+        <button type="button" class="secondary small" :disabled="bulkBusy" @click="bulk('enable')">有効化</button>
+        <button type="button" class="secondary small" :disabled="bulkBusy" @click="bulk('reset')">パスワードリセット</button>
+        <button type="button" class="secondary small" :disabled="bulkBusy" :aria-expanded="bulkChannels.open" @click="bulkChannels.open = !bulkChannels.open">使えるチャンネル…</button>
+        <template v-if="isSuper()">
+          <button type="button" class="secondary small" :disabled="bulkBusy" @click="bulk('admin_on')">管理者にする</button>
+          <button type="button" class="secondary small" :disabled="bulkBusy" @click="bulk('admin_off')">管理者を解除</button>
+        </template>
+        <button type="button" class="small danger-fill" :disabled="bulkBusy" @click="bulk('delete')">削除</button>
+        <button type="button" class="secondary small" :disabled="bulkBusy" @click="clearSelection">選択を解除</button>
+        <span v-if="bulkBusy" class="muted">処理中…</span>
+        <div v-if="bulkChannels.open" class="bulk-channels">
+          <label class="check"><input v-model="bulkChannels.all" type="checkbox" /> すべて（今後追加するチャンネルも）</label>
+          <template v-if="!bulkChannels.all">
+            <label v-for="c in channels" :key="c.id" class="check"><input v-model="bulkChannels.ids" type="checkbox" :value="c.id" /> {{ c.name }}</label>
+          </template>
+          <button type="button" class="small" :disabled="bulkBusy" @click="bulk('channels')">選んだ人に設定</button>
+        </div>
+      </div>
+      <div v-if="bulkResult" class="table-wrap bulk-result">
+        <div class="row"><strong>{{ ACTION_LABEL[bulkResult.action] }}の結果</strong><button type="button" class="secondary small" @click="bulkResult = null">閉じる</button></div>
+        <table>
+          <thead><tr><th>ID</th><th>名前</th><th>結果</th><th v-if="bulkResult.action === 'reset'">新しい初期パスワード</th><th v-if="bulkResult.action === 'reset'">メール</th></tr></thead>
+          <tbody>
+            <tr v-for="x in bulkResult.results" :key="x.id">
+              <td>{{ x.display_id }}</td>
+              <td>{{ x.name }}</td>
+              <td :class="{ error: x.result !== 'ok' }">{{ x.result === 'ok' ? '完了' : x.result }}</td>
+              <td v-if="bulkResult.action === 'reset'"><code v-if="x.initial_password">{{ x.initial_password }}</code></td>
+              <td v-if="bulkResult.action === 'reset'" :class="{ error: x.mail && x.mail !== 'sent' && x.mail !== 'skipped' }">{{ x.mail === 'sent' ? '送信済み' : x.mail === 'skipped' || !x.mail ? '—' : x.mail }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-if="renumbered.length" class="table-wrap bulk-result">
+        <div class="row"><strong>ID が変わった人（本人に新しいログイン ID を伝えてください）</strong><button type="button" class="secondary small" @click="renumbered = []">閉じる</button></div>
+        <table>
+          <thead><tr><th>名前</th><th>旧 ID</th><th>新 ID</th></tr></thead>
+          <tbody>
+            <tr v-for="x in renumbered" :key="x.id"><td>{{ x.name }}</td><td>{{ x.old }}</td><td><strong>{{ x.new }}</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
+              <th class="sel-cell"><input type="checkbox" :checked="allShownSelected" aria-label="表示中のユーザーをすべて選択" @change="toggleAll($event.target.checked)" /></th>
               <th>ID</th>
               <th>名前</th>
               <th>状態</th>
@@ -421,13 +598,30 @@ onMounted(load)
             </tr>
           </thead>
           <tbody>
-            <tr v-for="u in users" :key="u.id">
-              <td>{{ u.id }}</td>
+            <tr v-if="!filteredUsers.length"><td colspan="9" class="muted">該当するユーザーはいません</td></tr>
+            <tr v-for="u in filteredUsers" :key="u.id" :class="{ 'row-selected': selected[u.id] }">
+              <td class="sel-cell">
+                <input
+                  type="checkbox"
+                  :checked="!!selected[u.id]"
+                  :disabled="!selectable(u)"
+                  :aria-label="`${u.display_id} ${u.name} を選択`"
+                  :title="u.superuser ? 'スーパーユーザーは対象外です' : u.id === session.user?.id ? '自分自身は対象外です' : ''"
+                  @change="$event.target.checked ? (selected[u.id] = true) : delete selected[u.id]"
+                />
+              </td>
+              <td class="id-cell">
+                {{ u.display_id }}
+                <template v-if="showInternal">
+                  <br /><span class="muted internal-id" title="内部用 ID（16 進数 8 桁。変わりません）">内部 <code>{{ u.id }}</code></span>
+                  <br /><span class="muted internal-id" title="[内部用 8 桁][表示用 8 桁]">{{ u.uid }}</span>
+                </template>
+              </td>
               <td class="name-cell">
                 <form v-if="renaming[u.id]" class="name-edit" @submit.prevent="saveName(u)" @keydown.esc="delete renaming[u.id]">
-                  <input v-model="renaming[u.id].name" maxlength="40" required placeholder="名前" :aria-label="`${u.id} の名前`" />
-                  <input v-model="renaming[u.id].furigana" maxlength="40" placeholder="ふりがな" :aria-label="`${u.id} のふりがな`" />
-                  <input v-model="renaming[u.id].email" type="email" maxlength="254" placeholder="メールアドレス（空欄可）" autocomplete="off" :aria-label="`${u.id} のメールアドレス`" />
+                  <input v-model="renaming[u.id].name" maxlength="40" required placeholder="名前" :aria-label="`${u.display_id} の名前`" />
+                  <input v-model="renaming[u.id].furigana" maxlength="40" placeholder="ふりがな" :aria-label="`${u.display_id} のふりがな`" />
+                  <input v-model="renaming[u.id].email" type="email" maxlength="254" placeholder="メールアドレス（空欄可）" autocomplete="off" :aria-label="`${u.display_id} のメールアドレス`" />
                   <div class="row">
                     <button type="submit" class="small">保存</button>
                     <button type="button" class="secondary small" @click="delete renaming[u.id]">取消</button>
@@ -483,8 +677,8 @@ onMounted(load)
                   type="checkbox"
                   :checked="u.admin"
                   :aria-label="u.name + ' に管理者権限を付与'"
-                  :disabled="!isSuper() || u.id === SUPERUSER || u.id === session.user?.id"
-                  :title="isSuper() ? '' : 'admin の付与・解除はスーパーユーザー（0000）だけができます'"
+                  :disabled="!isSuper() || u.superuser || u.id === session.user?.id"
+                  :title="isSuper() ? '' : 'admin の付与・解除はスーパーユーザー（00000000）だけができます'"
                   @change="setFlag(u, 'admin', $event.target.checked)"
                 />
               </td>
@@ -504,8 +698,8 @@ onMounted(load)
                   :title="
                     u.id === session.user?.id
                       ? '自分のパスワードは「パスワード変更」から変更してください'
-                      : u.id === SUPERUSER
-                        ? '0000 のパスワードは管理画面からはリセットできません'
+                      : u.superuser
+                        ? 'スーパーユーザーのパスワードは管理画面からはリセットできません'
                         : !canManage(u)
                           ? '他の admin の操作はスーパーユーザーだけができます'
                           : ''
@@ -633,6 +827,19 @@ onMounted(load)
 .name-edit { display: grid; gap: 6px; min-width: 180px; }
 .name-edit input { min-height: 36px; padding: 6px 9px; }
 .users-panel table { font-size: .85rem; }
+.user-search { display: flex; gap: 12px; align-items: center; margin: 12px 0 4px; }
+.user-search input { flex: 1; max-width: 360px; }
+.user-search { flex-wrap: wrap; }
+.user-search .grow { flex: 1; }
+.bulk-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 8%, transparent); position: sticky; top: 0; z-index: 2; }
+.bulk-channels { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding-top: 6px; }
+.danger-fill { background: #dc2626; border-color: #dc2626; color: #fff; }
+.bulk-result { margin: 8px 0 12px; }
+.bulk-result .row { justify-content: space-between; margin-bottom: 6px; }
+.sel-cell { width: 36px; text-align: center; }
+.row-selected td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.id-cell { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.internal-id { font-size: .78rem; }
 .users-panel th, .users-panel td { padding: 12px 9px; }
 .channels-panel input.grow { min-width: 200px; }
 .channels-panel .channel-badge { width: 50px; height: 50px; }

@@ -58,6 +58,7 @@ pub async fn run(st: Arc<AppState>, user: AuthUser, socket: WebSocket) {
 
     let member = Member {
         user_id: &user.id,
+        display_id: &user.display_id,
         name: &user.name,
         admin: user.admin,
         superuser: user.superuser,
@@ -68,7 +69,7 @@ pub async fn run(st: Arc<AppState>, user: AuthUser, socket: WebSocket) {
         let _ = ws_tx.send(Message::Text(serde_json::to_string(&msg).unwrap())).await;
         return;
     };
-    tracing::info!("接続: {} ({}) conn={conn}", user.name, user.id);
+    tracing::info!("接続: {} ({}) conn={conn}", user.name, user.display_id);
     st.radio.broadcast_state();
 
     let (jev_tx, mut jev_rx) = mpsc::unbounded_channel::<Value>();
@@ -205,7 +206,7 @@ impl Ctx {
         let body = json!({
             "request": "join",
             "room": room,
-            "display": format!("{} ({})", self.user.name, self.user.id),
+            "display": format!("{} ({})", self.user.name, self.st.users.display_of(&self.user.id)),
             "muted": true,
             "bitrate": cfg.audio.bitrate,
         });
@@ -364,6 +365,7 @@ impl Ctx {
         let job = TtsJob {
             conn: self.conn,
             user_id: self.user.id.clone(),
+            display_id: self.st.users.display_of(&self.user.id),
             // 接続中に管理画面で名前が変わっていても、いまの名前で記録する
             name: self.st.users.get(&self.user.id).map(|u| u.name).unwrap_or_else(|| self.user.name.clone()),
             channel_id: leg.channel,
@@ -386,7 +388,7 @@ impl Ctx {
             poller.abort();
             let _ = self.st.janus.destroy(session).await;
         }
-        tracing::info!("切断: {} ({}) conn={}", self.user.name, self.user.id, self.conn);
+        tracing::info!("切断: {} ({}) conn={}", self.user.name, self.user.display_id, self.conn);
         self.st.radio.broadcast_state();
     }
 }

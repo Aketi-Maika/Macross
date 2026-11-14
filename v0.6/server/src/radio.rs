@@ -62,6 +62,8 @@ pub enum ServerMsg {
     Pong,
     /// 権限（admin / スーパーユーザー）が変わった。ブラウザはメニュー等を切り替える
     Role { admin: bool, superuser: bool },
+    /// 表示用 ID（ログイン ID）が付け直された
+    Renumbered { display_id: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,7 +103,10 @@ impl Location {
 /// 地図に出す接続中ユーザ
 #[derive(Debug, Clone, Serialize)]
 pub struct PositionView {
+    /// 内部用 ID
     pub id: String,
+    /// 表示用 ID
+    pub display_id: String,
     pub name: String,
     pub admin: bool,
     pub superuser: bool,
@@ -163,6 +168,7 @@ pub struct Snapshot {
 /// 接続を登録するときの情報
 pub struct Member<'a> {
     pub user_id: &'a str,
+    pub display_id: &'a str,
     pub name: &'a str,
     pub admin: bool,
     pub superuser: bool,
@@ -171,7 +177,10 @@ pub struct Member<'a> {
 }
 
 struct Client {
+    /// 内部用 ID
     user_id: String,
+    /// 表示用 ID（画面・録音・位置の記録に出す）
+    display_id: String,
     name: String,
     admin: bool,
     superuser: bool,
@@ -390,6 +399,7 @@ impl Radio {
             conn,
             Client {
                 user_id: m.user_id.into(),
+                display_id: m.display_id.into(),
                 name: m.name.into(),
                 admin: m.admin,
                 superuser: m.superuser,
@@ -441,6 +451,18 @@ impl Radio {
         }
     }
 
+    /// 表示用 ID の付け直しを接続中のページに反映する
+    pub fn set_display(&self, user_id: &str, display_id: &str) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            for c in inner.clients.values_mut().filter(|c| c.user_id == user_id) {
+                c.display_id = display_id.to_string();
+                let _ = c.tx.send(ServerMsg::Renumbered { display_id: display_id.to_string() });
+            }
+        }
+        self.broadcast_state();
+    }
+
     /// 名前の変更を接続中のページ（発言者の表示など）に反映する
     pub fn rename(&self, user_id: &str, name: &str) {
         {
@@ -464,7 +486,7 @@ impl Radio {
         match inner.clients.get_mut(&conn) {
             Some(c) => {
                 // 記録するかどうか（間隔・移動距離）は記録側で判断する
-                self.gnss.record(Point::new(&c.user_id, &c.name, Kind::Pos, "", loc.clone()));
+                self.gnss.record(Point::new(&c.display_id, &c.name, Kind::Pos, "", loc.clone()));
                 c.location = Some(loc);
                 true
             }
@@ -479,7 +501,7 @@ impl Radio {
         let inner = self.inner.lock().unwrap();
         for c in inner.clients.values() {
             if let Some(l) = c.location.as_ref().filter(|l| now - l.ts <= fresh_ms) {
-                self.gnss.record(Point::new(&c.user_id, &c.name, Kind::Pos, "", l.clone()));
+                self.gnss.record(Point::new(&c.display_id, &c.name, Kind::Pos, "", l.clone()));
             }
         }
     }
@@ -492,7 +514,7 @@ impl Radio {
     fn push_history(&self, inner: &mut Inner, conn: u64, channel: &str, kind: Kind) {
         let Some(c) = inner.clients.get(&conn) else { return };
         let Some(location) = c.location.clone() else { return };
-        self.gnss.record(Point::new(&c.user_id, &c.name, kind, channel, location));
+        self.gnss.record(Point::new(&c.display_id, &c.name, kind, channel, location));
     }
 
     /// 読み上げを発信として履歴に残す
@@ -511,6 +533,7 @@ impl Radio {
             .values()
             .map(|c| PositionView {
                 id: c.user_id.clone(),
+                display_id: c.display_id.clone(),
                 name: c.name.clone(),
                 admin: c.admin,
                 superuser: c.superuser,
@@ -519,7 +542,7 @@ impl Radio {
                 location: c.location.clone(),
             })
             .collect();
-        users.sort_by(|a, b| a.id.cmp(&b.id));
+        users.sort_by(|a, b| a.display_id.cmp(&b.display_id));
         users
     }
 
@@ -588,7 +611,7 @@ impl Radio {
         let client = inner.clients.get_mut(&conn).unwrap();
         let start = now_jst();
         let talk = Talk {
-            user_id: client.user_id.clone(),
+            user_id: client.display_id.clone(),
             name: client.name.clone(),
             channel_id: ch,
             channel_name: def.name,
@@ -670,7 +693,7 @@ impl Radio {
                     .flatten()
                     .filter_map(|conn| inner.clients.get(conn))
                     .map(|cl| Speaker {
-                        id: cl.user_id.clone(),
+                        id: cl.display_id.clone(),
                         name: cl.name.clone(),
                         admin: cl.admin,
                         superuser: cl.superuser,

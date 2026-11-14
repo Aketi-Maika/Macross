@@ -25,7 +25,10 @@ const ALPHA: [f32; 6] = [0.50, 0.52, 0.54, 0.56, 0.58, 0.60];
 
 pub struct TtsJob {
     pub conn: u64,
+    /// 内部用 ID（声の選択・連投の制限）
     pub user_id: String,
+    /// 表示用 ID（画面・録音に出す）
+    pub display_id: String,
     pub name: String,
     pub channel_id: u32,
     pub text: String,
@@ -265,12 +268,12 @@ async fn play(st: Arc<AppState>, job: TtsJob, audio: Audio, lock: Arc<tokio::syn
     }
     Metrics::inc(&st.metrics.tts_total);
     st.metrics.inc_channel_tts(&ch.name);
-    tracing::info!("読み上げ: {} ({}) → {}: {}", job.name, job.user_id, ch.name, job.text);
+    tracing::info!("読み上げ: {} ({}) → {}: {}", job.name, job.display_id, ch.name, job.text);
     st.radio.send_to_channel(
         ch.id,
         ServerMsg::Tts {
             channel: ch.id,
-            id: job.user_id.clone(),
+            id: job.display_id.clone(),
             name: job.name.clone(),
             text: job.text.clone(),
             time: start.format("%H:%M:%S").to_string(),
@@ -282,7 +285,7 @@ async fn play(st: Arc<AppState>, job: TtsJob, audio: Audio, lock: Arc<tokio::syn
     st.recorder.submit_tts(TtsRecord {
         wav: audio.wav,
         channel_name: ch.name,
-        user_id: job.user_id,
+        user_id: job.display_id,
         name: job.name,
         text: job.text,
         start,

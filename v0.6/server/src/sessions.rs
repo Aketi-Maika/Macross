@@ -87,6 +87,20 @@ impl Sessions {
         }
     }
 
+    /// ID の形式を変えたときに、セッションのユーザ ID を付け替える（旧 ID → 新 ID）
+    pub fn rekey(&self, map: &[(String, String)]) {
+        if map.is_empty() {
+            return;
+        }
+        let mut m = self.inner.lock().unwrap();
+        for e in m.values_mut() {
+            if let Some((_, new)) = map.iter().find(|(old, _)| *old == e.user) {
+                e.user = new.clone();
+            }
+        }
+        self.save(&m);
+    }
+
     /// そのユーザのセッションをすべて破棄（無効化・パスワードリセット時）
     pub fn remove_user(&self, user: &str) {
         let mut m = self.inner.lock().unwrap();

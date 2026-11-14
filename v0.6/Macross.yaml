@@ -21,7 +21,7 @@ server:
   session_days: 30              # ログインを保つ日数（使っている間は自動で延長。サーバを再起動してもログインしたまま）
 
 limits:
-  max_connections: 30           # 最大同時接続数（フェーズ1は30）
+  max_connections: 100          # 最大同時接続数
 
 channels:
   room_base: 1001               # チャンネル n は Janus のルーム番号 room_base + n - 1

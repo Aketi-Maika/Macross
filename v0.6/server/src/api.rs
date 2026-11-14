@@ -143,7 +143,7 @@ pub async fn login(
     };
     let token = random_token(48);
     st.sessions.insert(&token, &user.id);
-    tracing::info!("ログイン: {} ({})", user.name, user.id);
+    tracing::info!("ログイン: {} ({})", user.name, user.display_id);
     Ok((jar.add(session_cookie(&st, token)), Json(user)))
 }
 
@@ -310,10 +310,10 @@ pub async fn create_user(
     AdminUser(admin): AdminUser,
     Json(req): Json<CreateUserReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (id, password) = st.users.create_user(&req.name, &req.furigana, &req.email)?;
-    tracing::info!("ID {id} を発行 (by {})", admin.id);
-    let mail = mail_password(&st, &id, req.name.trim(), &req.email, &password, false, req.send_mail).await;
-    Ok(Json(json!({ "id": id, "initial_password": password, "mail": mail })))
+    let (id, disp, password) = st.users.create_user(&req.name, &req.furigana, &req.email)?;
+    tracing::info!("ID {}（内部 {}）を発行 (by {})", disp, id, admin.display_id);
+    let mail = mail_password(&st, &disp, req.name.trim(), &req.email, &password, false, req.send_mail).await;
+    Ok(Json(json!({ "id": id, "display_id": disp, "initial_password": password, "mail": mail })))
 }
 
 /// 一括登録用 CSV のテンプレート（Excel で開けるよう BOM 付き UTF-8）
@@ -340,20 +340,38 @@ pub struct ImportReq {
     send_mail: bool,
 }
 
-/// CSV で一括登録。全行を検証してから登録する
+/// CSV で一括登録（人数の上限なし）。全行を検証してから、全員を 1 度に登録する。
+/// メールは登録のあとに別タスクで順に送る（送信中にブラウザとの通信が切れても、全員に送り終える）
 pub async fn import_users(
     State(st): State<Arc<AppState>>,
     AdminUser(admin): AdminUser,
     Json(req): Json<ImportReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let rows = users::parse_import(&req.csv)?;
-    let mut out = vec![];
-    for r in rows {
-        let (id, password) = st.users.create_user(&r.name, &r.furigana, &r.email)?;
-        let mail = mail_password(&st, &id, &r.name, &r.email, &password, false, req.send_mail).await;
-        out.push(json!({ "id": id, "name": r.name, "email": r.email, "initial_password": password, "mail": mail }));
-    }
-    tracing::info!("CSV で {} 人を登録 (by {})", out.len(), admin.id);
+    let created = st.users.create_users(&rows)?;
+    tracing::info!(
+        "CSV で {} 人を登録: {}〜{} (by {})",
+        created.len(),
+        created.first().map(|c| c.1.as_str()).unwrap_or(""),
+        created.last().map(|c| c.1.as_str()).unwrap_or(""),
+        admin.display_id
+    );
+    let send = req.send_mail;
+    let st2 = st.clone();
+    let list: Vec<(String, String, String, String, String)> = rows
+        .into_iter()
+        .zip(created)
+        .map(|(r, (id, display, pw))| (id, display, r.name.trim().to_string(), r.email.trim().to_string(), pw))
+        .collect();
+    let task = tokio::spawn(async move {
+        let mut out = vec![];
+        for (id, display, name, email, password) in list {
+            let mail = mail_password(&st2, &display, &name, &email, &password, false, send).await;
+            out.push(json!({ "id": id, "display_id": display, "name": name, "email": email, "initial_password": password, "mail": mail }));
+        }
+        out
+    });
+    let out = task.await.map_err(|e| ApiError::from(anyhow::anyhow!("メール送信の処理が異常終了しました: {e}")))?;
     Ok(Json(json!({ "users": out })))
 }
 
@@ -404,11 +422,11 @@ pub async fn update_user(
     if id == admin.id && (req.admin == Some(false) || req.disabled == Some(true)) {
         return Err(ApiError::bad("自分自身の admin 権限の解除・無効化はできません"));
     }
-    if id == SUPERUSER_ID {
-        return Err(ApiError::forbidden("スーパーユーザー（0000）の権限は変更できません"));
+    if st.users.is_superuser(&id) {
+        return Err(ApiError::forbidden(format!("スーパーユーザー（{SUPERUSER_ID}）の権限は変更できません")));
     }
     if req.admin.is_some() && !admin.superuser {
-        return Err(ApiError::forbidden("admin 権限の付与・解除はスーパーユーザー（0000）だけができます"));
+        return Err(ApiError::forbidden(format!("admin 権限の付与・解除はスーパーユーザー（{SUPERUSER_ID}）だけができます")));
     }
     check_target(&st, &admin, &id)?;
     st.users.update_flags(&id, req.admin, req.disabled)?;
@@ -425,7 +443,7 @@ pub async fn update_user(
         st.sessions.remove_user(&id);
         st.radio.kick_user(&id, "この ID は管理者により無効化されました");
     }
-    tracing::info!("ID {id} の権限を変更 admin={:?} disabled={:?} (by {})", req.admin, req.disabled, admin.id);
+    tracing::info!("ID {} の権限を変更 admin={:?} disabled={:?} (by {})", st.users.display_of(&id), req.admin, req.disabled, admin.display_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -444,8 +462,8 @@ pub async fn update_profile(
     Json(req): Json<ProfileReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     if id != admin.id {
-        if id == SUPERUSER_ID && !admin.superuser {
-            return Err(ApiError::forbidden("スーパーユーザー（0000）の名前・メールアドレスはスーパーユーザーだけが変更できます"));
+        if st.users.is_superuser(&id) && !admin.superuser {
+            return Err(ApiError::forbidden(format!("スーパーユーザー（{SUPERUSER_ID}）の名前・メールアドレスはスーパーユーザーだけが変更できます")));
         }
         check_target(&st, &admin, &id)?;
     }
@@ -477,19 +495,20 @@ pub async fn reset_password(
     if id == admin.id {
         return Err(ApiError::bad("自分のパスワードは「パスワード変更」から変更してください"));
     }
-    if id == SUPERUSER_ID {
-        return Err(ApiError::forbidden(
-            "スーパーユーザー（0000）のパスワードは管理画面からはリセットできません（README の「0000 のパスワードを忘れたとき」を参照）",
-        ));
+    if st.users.is_superuser(&id) {
+        return Err(ApiError::forbidden(format!(
+            "スーパーユーザー（{SUPERUSER_ID}）のパスワードは管理画面からはリセットできません（README の「0000 のパスワードを忘れたとき」を参照）"
+        )));
     }
     check_target(&st, &admin, &id)?;
     let password = st.users.reset_password(&id)?;
     st.sessions.remove_user(&id);
     st.radio.kick_user(&id, "パスワードがリセットされたため、もう一度ログインしてください");
-    tracing::info!("ID {id} のパスワードをリセット (by {})", admin.id);
+    let disp = st.users.display_of(&id);
+    tracing::info!("ID {} のパスワードをリセット (by {})", disp, admin.display_id);
     let (name, email) = st.users.contact(&id).unwrap_or_default();
-    let mail = mail_password(&st, &id, &name, &email, &password, true, req.send_mail).await;
-    Ok(Json(json!({ "id": id, "initial_password": password, "mail": mail })))
+    let mail = mail_password(&st, &disp, &name, &email, &password, true, req.send_mail).await;
+    Ok(Json(json!({ "id": id, "display_id": disp, "initial_password": password, "mail": mail })))
 }
 
 /// 他の admin の無効化・パスワードリセットはスーパーユーザーだけができる
@@ -499,7 +518,7 @@ fn check_target(st: &AppState, actor: &AuthUser, id: &str) -> ApiResult<()> {
     }
     let target_admin = st.users.list().iter().any(|u| u.id == id && u.admin);
     if target_admin {
-        return Err(ApiError::forbidden("他の admin の操作はスーパーユーザー（0000）だけができます"));
+        return Err(ApiError::forbidden(format!("他の admin の操作はスーパーユーザー（{SUPERUSER_ID}）だけができます")));
     }
     Ok(())
 }
@@ -622,6 +641,158 @@ pub async fn system(State(st): State<Arc<AppState>>, _: AdminUser) -> Json<serde
 }
 
 /// Caddy の forward_auth 用。admin でログインしていれば 204（File Browser・Grafana へのアクセスを許可）
+#[derive(Deserialize)]
+pub struct BulkReq {
+    /// 内部用 ID
+    ids: Vec<String>,
+    /// delete / disable / enable / reset / admin_on / admin_off / channels
+    action: String,
+    /// reset: 新しい初期パスワードをメールで送る
+    #[serde(default)]
+    send_mail: bool,
+    /// channels: 使えるチャンネル（None = すべて）
+    #[serde(default)]
+    channels: Option<Vec<u32>>,
+}
+
+/// 選んだユーザーへの一括操作。操作できない人は理由を付けて飛ばし、ほかの人には実行する
+pub async fn bulk_users(
+    State(st): State<Arc<AppState>>,
+    AdminUser(admin): AdminUser,
+    Json(req): Json<BulkReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    const ACTIONS: [&str; 7] = ["delete", "disable", "enable", "reset", "admin_on", "admin_off", "channels"];
+    if !ACTIONS.contains(&req.action.as_str()) {
+        return Err(ApiError::bad("不明な操作です"));
+    }
+    if req.ids.is_empty() {
+        return Err(ApiError::bad("ユーザーを選んでください"));
+    }
+    if matches!(req.action.as_str(), "admin_on" | "admin_off") && !admin.superuser {
+        return Err(ApiError::forbidden(format!("admin 権限の付与・解除はスーパーユーザー（{SUPERUSER_ID}）だけができます")));
+    }
+    if req.action == "channels" {
+        if let Some(list) = &req.channels {
+            let valid: Vec<u32> = st.radio.channels().iter().map(|c| c.id).collect();
+            if list.iter().any(|c| !valid.contains(c)) {
+                return Err(ApiError::bad("存在しないチャンネルが含まれています"));
+            }
+        }
+    }
+    let all = st.users.list();
+    let mut results = vec![];
+    let mut targets = vec![];
+    let mut seen = std::collections::HashSet::new();
+    for id in &req.ids {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(u) = all.iter().find(|u| &u.id == id) else {
+            results.push(json!({ "id": id, "display_id": id, "name": "", "result": "存在しません" }));
+            continue;
+        };
+        let skip = if u.superuser {
+            Some("スーパーユーザーは対象外です")
+        } else if u.id == admin.id && req.action != "enable" {
+            Some("自分自身は対象外です")
+        } else if u.admin && !admin.superuser {
+            Some("他の admin はスーパーユーザーだけが操作できます")
+        } else if req.action == "channels" && u.admin {
+            Some("admin は常にすべてのチャンネルを使えます")
+        } else {
+            None
+        };
+        match skip {
+            Some(why) => results.push(json!({ "id": u.id, "display_id": u.display_id, "name": u.name, "result": why })),
+            None => targets.push(u.clone()),
+        }
+    }
+
+    let mut mails = vec![];
+    match req.action.as_str() {
+        "delete" => {
+            for u in &targets {
+                st.sessions.remove_user(&u.id);
+                st.radio.kick_user(&u.id, "この ID は管理者により削除されました");
+            }
+            let ids: Vec<String> = targets.iter().map(|u| u.id.clone()).collect();
+            st.users.delete_users(&ids)?;
+            for u in &targets {
+                results.push(json!({ "id": u.id, "display_id": u.display_id, "name": u.name, "result": "ok" }));
+            }
+        }
+        "disable" | "enable" => {
+            let disable = req.action == "disable";
+            for u in &targets {
+                st.users.update_flags(&u.id, None, Some(disable))?;
+                if disable {
+                    st.sessions.remove_user(&u.id);
+                    st.radio.kick_user(&u.id, "この ID は管理者により無効化されました");
+                }
+                results.push(json!({ "id": u.id, "display_id": u.display_id, "name": u.name, "result": "ok" }));
+            }
+        }
+        "admin_on" | "admin_off" => {
+            let on = req.action == "admin_on";
+            for u in &targets {
+                st.users.update_flags(&u.id, Some(on), None)?;
+                st.radio.set_access(&u.id, st.users.channels_of(&u.id));
+                st.radio.set_role(&u.id, on, false);
+                results.push(json!({ "id": u.id, "display_id": u.display_id, "name": u.name, "result": "ok" }));
+            }
+        }
+        "channels" => {
+            for u in &targets {
+                st.users.set_channels(&u.id, req.channels.clone())?;
+                st.radio.set_access(&u.id, st.users.channels_of(&u.id));
+                results.push(json!({ "id": u.id, "display_id": u.display_id, "name": u.name, "result": "ok" }));
+            }
+        }
+        _ => {
+            // reset: パスワードを発行してログアウトさせ、メールはあとで順に送る
+            for u in &targets {
+                let password = st.users.reset_password(&u.id)?;
+                st.sessions.remove_user(&u.id);
+                st.radio.kick_user(&u.id, "パスワードがリセットされたため、もう一度ログインしてください");
+                mails.push((u.id.clone(), u.display_id.clone(), u.name.clone(), u.email.clone(), password));
+            }
+        }
+    }
+    if !mails.is_empty() {
+        let st2 = st.clone();
+        let send = req.send_mail;
+        let task = tokio::spawn(async move {
+            let mut out = vec![];
+            for (id, display, name, email, password) in mails {
+                let mail = mail_password(&st2, &display, &name, &email, &password, true, send).await;
+                out.push(json!({ "id": id, "display_id": display, "name": name, "result": "ok", "initial_password": password, "mail": mail }));
+            }
+            out
+        });
+        results.extend(task.await.map_err(|e| ApiError::from(anyhow::anyhow!("メール送信の処理が異常終了しました: {e}")))?);
+    }
+    let done = results.iter().filter(|r| r["result"] == "ok").count();
+    tracing::info!("一括操作 {}: {done} 人 / 選択 {} 人 (by {})", req.action, req.ids.len(), admin.display_id);
+    Ok(Json(json!({ "action": req.action, "done": done, "results": results, "gaps": st.users.gaps() })))
+}
+
+/// 表示用 ID を 1, 2, 3… の連番に付け直す（削除で欠番ができたとき）。ログイン ID が変わった人の一覧を返す
+pub async fn renumber_users(State(st): State<Arc<AppState>>, AdminUser(admin): AdminUser) -> ApiResult<Json<serde_json::Value>> {
+    let changed = st.users.renumber()?;
+    for (id, _, new) in &changed {
+        st.radio.set_display(id, new);
+    }
+    tracing::info!("表示用 ID を詰め直し: {} 人の ID が変更 (by {})", changed.len(), admin.display_id);
+    let list: Vec<_> = changed
+        .iter()
+        .map(|(id, old, new)| {
+            let name = st.users.contact(id).map(|c| c.0).unwrap_or_default();
+            json!({ "id": id, "name": name, "old": old, "new": new })
+        })
+        .collect();
+    Ok(Json(json!({ "changed": list })))
+}
+
 pub async fn auth_admin(_: AdminUser) -> StatusCode {
     StatusCode::NO_CONTENT
 }

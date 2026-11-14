@@ -556,6 +556,11 @@ async function onMessage(msg) {
       }
       message.value = msg.admin ? '管理者の権限が付与されました' : '管理者の権限が解除されました'
       break
+    case 'renumbered':
+      // 管理者が ID を詰め直した（パスワードはそのまま。次からは新しい ID でログインする）
+      if (session.user) session.user.display_id = msg.display_id
+      message.value = `あなたのログイン ID が ${msg.display_id} に変わりました（パスワードはそのままです）`
+      break
   }
 }
 

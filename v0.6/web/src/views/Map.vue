@@ -374,7 +374,7 @@ function focusUser(id, info = false) {
   const u = users.value.find((x) => x.id === id)
   if (u?.location) {
     flyTo(u.location)
-    if (info) showInfo({ ts: u.location.ts, name: u.name, id: u.id, location: u.location })
+    if (info) showInfo({ ts: u.location.ts, name: u.name, id: u.display_id ?? u.id, location: u.location })
   }
   render()
 }
@@ -556,7 +556,7 @@ onBeforeUnmount(() => {
           <span class="state" :style="{ background: COLORS[stateOf(u)] }"></span>
           <div class="grow">
             <div>
-              {{ u.name }} <span class="muted">({{ u.id }})</span>
+              {{ u.name }} <span class="muted">({{ u.display_id ?? u.id }})</span>
               <span v-if="u.superuser" class="tag su">SU</span>
               <span v-else-if="u.admin" class="tag">管理者</span>
             </div>
