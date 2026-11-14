@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
     let metrics_listen = cfg.server.metrics_listen.clone();
     let geocoder = geocode::Geocoder::new(&cfg.location);
     let sessions = sessions::Sessions::open(data_dir.join("sessions.json"), cfg.server.session_days);
-    // ID を 16 桁に変換したときは、ログインしたままになるようセッションを付け替える
+    // ID の形式を変換したときは、ログインしたままになるようセッションを付け替える
     sessions.rekey(&migrated);
     let mailer = mail::Mailer::open(data_dir.join("mail.json"), &cfg.mail);
     let state = Arc::new(AppState {
@@ -153,6 +153,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/admin/users/import", post(api::import_users).layer(DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/api/admin/mail", get(api::get_mail).put(api::put_mail))
         .route("/api/admin/mail/test", post(api::test_mail))
+        .route("/api/admin/events", get(api::list_events).post(api::create_event))
+        .route("/api/admin/events/:id", patch(api::update_event).delete(api::delete_event))
         .route("/api/admin/users/bulk", post(api::bulk_users))
         .route("/api/admin/users/renumber", post(api::renumber_users))
         .route("/api/admin/users/:id", patch(api::update_user))

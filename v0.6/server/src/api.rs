@@ -274,6 +274,9 @@ pub async fn list_users(State(st): State<Arc<AppState>>, _: AdminUser) -> Json<V
 
 #[derive(Deserialize)]
 pub struct CreateUserReq {
+    /// 登録するイベント（空なら 0000）
+    #[serde(default)]
+    event: String,
     name: String,
     #[serde(default)]
     furigana: String,
@@ -310,7 +313,7 @@ pub async fn create_user(
     AdminUser(admin): AdminUser,
     Json(req): Json<CreateUserReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (id, disp, password) = st.users.create_user(&req.name, &req.furigana, &req.email)?;
+    let (id, disp, password) = st.users.create_user(&req.event, &req.name, &req.furigana, &req.email)?;
     tracing::info!("ID {}（内部 {}）を発行 (by {})", disp, id, admin.display_id);
     let mail = mail_password(&st, &disp, req.name.trim(), &req.email, &password, false, req.send_mail).await;
     Ok(Json(json!({ "id": id, "display_id": disp, "initial_password": password, "mail": mail })))
@@ -335,6 +338,9 @@ pub async fn users_template(_: AdminUser) -> Response {
 
 #[derive(Deserialize)]
 pub struct ImportReq {
+    /// 登録するイベント（空なら 0000）
+    #[serde(default)]
+    event: String,
     csv: String,
     #[serde(default)]
     send_mail: bool,
@@ -348,7 +354,7 @@ pub async fn import_users(
     Json(req): Json<ImportReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let rows = users::parse_import(&req.csv)?;
-    let created = st.users.create_users(&rows)?;
+    let created = st.users.create_users(&req.event, &rows)?;
     tracing::info!(
         "CSV で {} 人を登録: {}〜{} (by {})",
         created.len(),
@@ -777,8 +783,18 @@ pub async fn bulk_users(
 }
 
 /// 表示用 ID を 1, 2, 3… の連番に付け直す（削除で欠番ができたとき）。ログイン ID が変わった人の一覧を返す
-pub async fn renumber_users(State(st): State<Arc<AppState>>, AdminUser(admin): AdminUser) -> ApiResult<Json<serde_json::Value>> {
-    let changed = st.users.renumber()?;
+#[derive(Deserialize)]
+pub struct RenumberReq {
+    #[serde(default)]
+    event: String,
+}
+
+pub async fn renumber_users(
+    State(st): State<Arc<AppState>>,
+    AdminUser(admin): AdminUser,
+    Json(req): Json<RenumberReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let changed = st.users.renumber(&req.event)?;
     for (id, _, new) in &changed {
         st.radio.set_display(id, new);
     }
@@ -791,6 +807,45 @@ pub async fn renumber_users(State(st): State<Arc<AppState>>, AdminUser(admin): A
         })
         .collect();
     Ok(Json(json!({ "changed": list })))
+}
+
+pub async fn list_events(State(st): State<Arc<AppState>>, _: AdminUser) -> Json<Vec<users::EventView>> {
+    Json(st.users.events())
+}
+
+#[derive(Deserialize)]
+pub struct EventReq {
+    /// イベント ID（4 桁。作成時に空なら自動で次の番号）
+    #[serde(default)]
+    id: String,
+    name: String,
+}
+
+pub async fn create_event(
+    State(st): State<Arc<AppState>>,
+    AdminUser(admin): AdminUser,
+    Json(req): Json<EventReq>,
+) -> ApiResult<Json<users::Event>> {
+    let ev = st.users.create_event(&req.id, &req.name)?;
+    tracing::info!("イベント {} ({}) を登録 (by {})", ev.id, ev.name, admin.display_id);
+    Ok(Json(ev))
+}
+
+pub async fn update_event(
+    State(st): State<Arc<AppState>>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<String>,
+    Json(req): Json<EventReq>,
+) -> ApiResult<StatusCode> {
+    st.users.rename_event(&id, &req.name)?;
+    tracing::info!("イベント {id} の名前を変更: {} (by {})", req.name.trim(), admin.display_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn delete_event(State(st): State<Arc<AppState>>, AdminUser(admin): AdminUser, Path(id): Path<String>) -> ApiResult<StatusCode> {
+    st.users.delete_event(&id)?;
+    tracing::info!("イベント {id} を削除 (by {})", admin.display_id);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn auth_admin(_: AdminUser) -> StatusCode {

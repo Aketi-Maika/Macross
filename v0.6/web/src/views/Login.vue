@@ -30,7 +30,7 @@ async function submit() {
     <form class="panel auth-panel" @submit.prevent="submit">
       <div class="auth-intro"><span class="auth-symbol"><UiIcon name="radio" /></span><h1>ログイン</h1><p class="muted">IDとパスワードを入力してください</p></div>
       <label for="id">ID</label>
-      <input id="id" v-model="id" autocomplete="username" inputmode="numeric" placeholder="例: 00000012（先頭の 0 は省略できます）" required />
+      <input id="id" v-model="id" autocomplete="username" inputmode="numeric" placeholder="例: 0001-0012（イベント ID-番号）" required />
       <label for="pw">パスワード</label>
       <div class="password-field"><input id="pw" v-model="password" :type="showPassword ? 'text' : 'password'" autocomplete="current-password" required /><button type="button" :aria-label="showPassword ? 'パスワードを隠す' : 'パスワードを表示'" :aria-pressed="showPassword" @click="showPassword = !showPassword"><UiIcon name="eye" /></button></div>
       <div class="form-actions">

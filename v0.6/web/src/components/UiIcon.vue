@@ -19,6 +19,7 @@ const paths = {
   folder: ['M2 5h8l2 3h10v13H2z'], file: ['M5 2h9l5 5v15H5zM14 2v6h5'],
   refresh: ['M20 7a9 9 0 1 0 1 8', 'M20 2v6h-6'], logout: ['M9 3H3v18h6M9 12h12m-5-5 5 5-5 5'],
   shield: ['m12 2 9 4v6c0 6-9 10-9 10S3 18 3 12V6z', 'm8 12 3 3 5-6'],
+  calendar: ['M3 5h18v16H3z', 'M3 10h18M8 2v5M16 2v5'],
 }
 </script>
 <template><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path v-for="(path, index) in paths[name] || paths.info" :key="index" :d="path" /></svg></template>

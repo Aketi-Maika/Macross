@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { api, session } from '../api.js'
 import UiIcon from '../components/UiIcon.vue'
 import ChannelBadge from '../components/ChannelBadge.vue'
@@ -7,6 +7,7 @@ import ChannelBadge from '../components/ChannelBadge.vue'
 const activeTab = ref('channels')
 const tabs = [
   { id: 'channels', label: 'チャンネル', icon: 'radio' },
+  { id: 'events', label: 'イベント', icon: 'calendar' },
   { id: 'users', label: 'ユーザー', icon: 'user' },
   { id: 'mail', label: 'メール設定', icon: 'mail' },
   { id: 'server', label: 'サーバ', icon: 'server' },
@@ -34,11 +35,22 @@ function normalize(t) {
     .replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60))
     .replace(/\s+/g, '')
 }
+/* イベント（ID はイベントごとに発行する） */
+const events = ref([])
+const eventFilter = ref('')
+const targetEvent = ref('0000')
+const eventName = (id) => events.value.find((e) => e.id === id)?.name ?? ''
+const newEvent = ref({ id: '', name: '' })
+const eventEdit = reactive({})
+// 一覧でイベントを絞り込んだら、ID 発行・CSV 登録の登録先も合わせる
+watch(eventFilter, (v) => { if (v) targetEvent.value = v })
+
 const filteredUsers = computed(() => {
   const words = userQuery.value.normalize('NFKC').split(/\s+/).map(normalize).filter(Boolean)
-  if (!words.length) return users.value
-  return users.value.filter((u) => {
-    const hay = normalize([u.display_id, Number(u.display_id), u.name, u.furigana, u.email, showInternal.value ? u.uid : ''].join(' '))
+  const inEvent = eventFilter.value ? users.value.filter((u) => u.event_id === eventFilter.value) : users.value
+  if (!words.length) return inEvent
+  return inEvent.filter((u) => {
+    const hay = normalize([u.display_id, u.display_id.replace('-', ''), u.name, u.furigana, u.email, eventName(u.event_id), showInternal.value ? u.uid : ''].join(' '))
     return words.every((w) => hay.includes(w))
   })
 })
@@ -112,17 +124,15 @@ async function bulk(action) {
   }
 }
 
-/* 表示用 ID の欠番（削除でできる）。ボタンで 1, 2, 3… に詰め直す */
-const gaps = computed(() => {
-  const max = Math.max(0, ...users.value.map((u) => Number(u.display_id) || 0))
-  return Math.max(0, max + 1 - users.value.length)
-})
+/* 表示 ID の欠番（削除でできる）。イベントごとにボタンで 0001, 0002… に詰め直す */
+const filterGaps = computed(() => (eventFilter.value ? events.value.find((e) => e.id === eventFilter.value)?.gaps ?? 0 : 0))
+const totalGaps = computed(() => events.value.reduce((n, e) => n + e.gaps, 0))
 const renumbered = ref([])
-async function renumber() {
-  if (!confirm(`表示用 ID を 1, 2, 3… の連番に詰め直しますか？（欠番 ${gaps.value}）\n\n欠番より後ろの人はログイン ID が変わります（パスワード・記録はそのまま）。\n変わった人の一覧を表示しますので、本人に新しい ID を伝えてください。`)) return
+async function renumber(ev) {
+  if (!confirm(`イベント ${ev.id}（${ev.name}）の表示 ID を 0001, 0002… の連番に詰め直しますか？（欠番 ${ev.gaps}）\n\n欠番より後ろの人はログイン ID が変わります（パスワード・記録はそのまま）。\n変わった人の一覧を表示しますので、本人に新しい ID を伝えてください。`)) return
   error.value = notice.value = ''
   try {
-    const r = await api.post('/api/admin/users/renumber', {})
+    const r = await api.post('/api/admin/users/renumber', { event: ev.id })
     renumbered.value = r.changed
     notice.value = r.changed.length ? `${r.changed.length} 人の ID を付け直しました（下の一覧を確認してください）` : '欠番はありません'
     await load()
@@ -278,7 +288,7 @@ async function importCsv() {
   notice.value = sendMail ? '登録してメールを送っています…（人数が多いと時間がかかります。この画面のままお待ちください）' : '登録しています…'
   try {
     const csv = await readCsv(file)
-    const r = await api.post('/api/admin/users/import', { csv, send_mail: sendMail })
+    const r = await api.post('/api/admin/users/import', { event: targetEvent.value, csv, send_mail: sendMail })
     imported.value = r.users
     const failed = r.users.filter((u) => u.mail !== 'sent' && u.mail !== 'skipped').length
     notice.value = `${r.users.length} 人を登録しました（${r.users[0]?.display_id}〜${r.users[r.users.length - 1]?.display_id}）` + (failed ? `。メールを送れなかった人が ${failed} 人います（下の表を確認してください）` : '')
@@ -292,6 +302,51 @@ async function importCsv() {
   }
 }
 
+async function addEvent() {
+  error.value = notice.value = ''
+  try {
+    const ev = await api.post('/api/admin/events', newEvent.value)
+    notice.value = `イベント ${ev.id}（${ev.name}）を登録しました。ID 発行・CSV 登録でこのイベントを選ぶと、${ev.id}-0001 から ID を発行します`
+    newEvent.value = { id: '', name: '' }
+    targetEvent.value = ev.id
+    await load()
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+async function saveEvent(ev) {
+  error.value = notice.value = ''
+  try {
+    await api.patch(`/api/admin/events/${ev.id}`, { name: eventEdit[ev.id] })
+    notice.value = `イベント ${ev.id} の名前を「${eventEdit[ev.id]}」に変更しました`
+    delete eventEdit[ev.id]
+    await load()
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+async function deleteEvent(ev) {
+  if (!confirm(`イベント ${ev.id}（${ev.name}）を削除しますか？`)) return
+  error.value = notice.value = ''
+  try {
+    await api.del(`/api/admin/events/${ev.id}`)
+    notice.value = `イベント ${ev.id} を削除しました`
+    if (eventFilter.value === ev.id) eventFilter.value = ''
+    if (targetEvent.value === ev.id) targetEvent.value = '0000'
+    await load()
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+function showEvent(ev) {
+  eventFilter.value = ev.id
+  targetEvent.value = ev.id
+  activeTab.value = 'users'
+}
+
 async function load() {
   error.value = ''
   try {
@@ -301,6 +356,7 @@ async function load() {
     maxChannels.value = c.max_channels
     maxConnections.value = c.max_connections
     users.value = await api.get('/api/admin/users')
+    events.value = await api.get('/api/admin/events')
     system.value = await api.get('/api/admin/system').catch(() => null)
   } catch (e) {
     error.value = e.message
@@ -351,6 +407,7 @@ async function createUser() {
   try {
     const r = await api.post('/api/admin/users', {
       ...form.value,
+      event: targetEvent.value,
       send_mail: form.value.send_mail && mailEnabled.value && !!form.value.email,
     })
     issued.value = { ...r, name: form.value.name }
@@ -443,11 +500,73 @@ onMounted(load)
       </form>
     </div>
 
+    <div v-show="activeTab === 'events'" id="panel-events" class="panel events-panel" role="tabpanel" aria-labelledby="tab-events">
+      <h2>イベント（{{ events.length }}）</h2>
+      <p class="muted">
+        ID は <code>[内部 ID 8 桁][イベント ID 4 桁][表示 ID 4 桁]</code> で管理します。ログイン ID は <code>イベント ID-表示 ID</code>（例: 0001-0012）で、
+        表示 ID はイベントごとに 0001 から発行します。イベントを登録してから、ユーザータブの「ID 発行」「CSV で一括登録」で登録先のイベントを選んでください。
+        0000 は既定のイベント（スーパーユーザーと以前からの ID）です。
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>イベント ID</th><th>名前</th><th>人数</th><th>欠番</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="ev in events" :key="ev.id">
+              <td><code>{{ ev.id }}</code></td>
+              <td>
+                <form v-if="eventEdit[ev.id] !== undefined" class="row" @submit.prevent="saveEvent(ev)" @keydown.esc="delete eventEdit[ev.id]">
+                  <input v-model="eventEdit[ev.id]" maxlength="40" required :aria-label="`イベント ${ev.id} の名前`" />
+                  <button type="submit" class="small">保存</button>
+                  <button type="button" class="secondary small" @click="delete eventEdit[ev.id]">取消</button>
+                </form>
+                <template v-else>
+                  {{ ev.name }}
+                  <button type="button" class="secondary small" @click="eventEdit[ev.id] = ev.name">変更</button>
+                </template>
+              </td>
+              <td>{{ ev.users }} 人</td>
+              <td>
+                <template v-if="ev.gaps">
+                  {{ ev.gaps }}
+                  <button type="button" class="secondary small" title="削除でできた欠番を詰めて、表示 ID を 0001, 0002… の連番にします" @click="renumber(ev)">番号を詰める</button>
+                </template>
+                <span v-else class="muted">なし</span>
+              </td>
+              <td class="nowrap">
+                <button type="button" class="secondary small" @click="showEvent(ev)">ユーザーを見る</button>
+                <button v-if="ev.id !== '0000'" type="button" class="secondary small danger" :disabled="ev.users > 0" :title="ev.users > 0 ? '登録されている人がいるイベントは削除できません' : ''" @click="deleteEvent(ev)">削除</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <form class="row" style="margin-top: 12px" @submit.prevent="addEvent">
+        <input v-model="newEvent.id" inputmode="numeric" maxlength="4" pattern="[0-9]{0,4}" placeholder="ID（空欄で自動）" style="width: 150px" aria-label="新しいイベントの ID（4 桁）" />
+        <input v-model="newEvent.name" class="grow" maxlength="40" required placeholder="新しいイベント名" aria-label="新しいイベント名" />
+        <button type="submit">登録</button>
+      </form>
+      <div v-if="renumbered.length" class="table-wrap bulk-result">
+        <div class="row"><strong>ID が変わった人（本人に新しいログイン ID を伝えてください）</strong><button type="button" class="secondary small" @click="renumbered = []">閉じる</button></div>
+        <table>
+          <thead><tr><th>名前</th><th>旧 ID</th><th>新 ID</th></tr></thead>
+          <tbody>
+            <tr v-for="x in renumbered" :key="x.id"><td>{{ x.name }}</td><td>{{ x.old }}</td><td><strong>{{ x.new }}</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- 右列（ID 発行・CSV）をまとめて上に詰める。ユーザー一覧が長くても CSV 欄が下にずれない -->
     <div v-show="activeTab === 'users'" class="users-side">
     <div v-show="activeTab === 'users'" class="panel issue-panel">
       <h2>ID 発行</h2>
       <form @submit.prevent="createUser">
+        <label for="new-user-event">イベント</label>
+        <select id="new-user-event" v-model="targetEvent">
+          <option v-for="ev in events" :key="ev.id" :value="ev.id">{{ ev.id }} {{ ev.name }}</option>
+        </select>
         <div class="row">
           <div class="grow">
             <label for="new-user-name">名前</label>
@@ -487,6 +606,11 @@ onMounted(load)
         <a class="button-link outline" href="/api/admin/users/template.csv" download><UiIcon name="download" />テンプレートをダウンロード</a>
       </div>
       <form class="row" style="margin-top: 12px" @submit.prevent="importCsv">
+        <label class="import-event">登録先のイベント
+          <select v-model="targetEvent" aria-label="CSV の登録先のイベント">
+            <option v-for="ev in events" :key="ev.id" :value="ev.id">{{ ev.id }} {{ ev.name }}</option>
+          </select>
+        </label>
         <input ref="importFile" type="file" accept=".csv,text/csv" class="grow" aria-label="登録するCSVファイル" />
         <label class="check">
           <input v-model="importMail" type="checkbox" :disabled="!mailEnabled" />
@@ -518,7 +642,7 @@ onMounted(load)
     <div v-show="activeTab === 'users'" id="panel-users" class="panel users-panel" role="tabpanel" aria-labelledby="tab-users">
       <h2>ユーザー一覧</h2>
       <p class="muted">
-        ID 00000000 はスーパーユーザー（最上位。無効化・権限の解除・削除はできません）。左のチェックで選んだ人に、削除・無効化などをまとめて行えます。admin の付与・解除と、他の admin の無効化・パスワードリセットはスーパーユーザーだけができます。
+        ID はイベント ID-表示 ID（例: 0001-0012）。0000-0000 はスーパーユーザー（最上位。無効化・権限の解除・削除はできません）。左のチェックで選んだ人に、削除・無効化などをまとめて行えます。admin の付与・解除と、他の admin の無効化・パスワードリセットはスーパーユーザーだけができます。
         「使えるチャンネル」で一般ユーザが聴ける・話せるチャンネルを制限できます（admin は常にすべて）。
         名前の横の「変更」で名前・ふりがな・メールアドレスを変えられます（録音の記録には、話した時点の名前が残ります）。
       </p>
@@ -527,14 +651,21 @@ onMounted(load)
         パスワードリセット時に新しい初期パスワードをメールで送る（メールアドレス登録済みの人のみ）
       </label>
       <div class="user-search">
+        <select v-model="eventFilter" class="event-filter" aria-label="表示するイベント">
+          <option value="">すべてのイベント</option>
+          <option v-for="ev in events" :key="ev.id" :value="ev.id">{{ ev.id }} {{ ev.name }}（{{ ev.users }}）</option>
+        </select>
         <input v-model="userQuery" type="search" placeholder="名前・ふりがな・ID・メールで検索" aria-label="ユーザーを検索" />
-        <span class="muted">{{ userQuery.trim() ? `${filteredUsers.length} / ${users.length} 人` : `${users.length} 人` }}</span>
+        <span class="muted">{{ userQuery.trim() || eventFilter ? `${filteredUsers.length} / ${users.length} 人` : `${users.length} 人` }}</span>
         <span class="grow"></span>
         <button type="button" class="secondary small" :aria-pressed="showInternal" @click="showInternal = !showInternal">
           {{ showInternal ? '内部 ID を隠す' : '内部 ID を表示' }}
         </button>
-        <button v-if="gaps" type="button" class="secondary small" title="削除でできた欠番を詰めて、表示用 ID を 1, 2, 3… の連番にします" @click="renumber">
-          番号を詰める（欠番 {{ gaps }}）
+        <button v-if="filterGaps" type="button" class="secondary small" title="削除でできた欠番を詰めて、このイベントの表示 ID を 0001, 0002… の連番にします" @click="renumber(events.find((e) => e.id === eventFilter))">
+          番号を詰める（欠番 {{ filterGaps }}）
+        </button>
+        <button v-else-if="!eventFilter && totalGaps" type="button" class="secondary small" title="イベントタブで、イベントごとに番号を詰められます" @click="activeTab = 'events'">
+          欠番 {{ totalGaps }}（イベントタブで詰める）
         </button>
       </div>
       <div v-if="selectedUsers.length" class="bulk-bar" role="region" aria-label="選択したユーザーへの一括操作">
@@ -612,9 +743,10 @@ onMounted(load)
               </td>
               <td class="id-cell">
                 {{ u.display_id }}
+                <br v-if="!eventFilter" /><span v-if="!eventFilter" class="muted internal-id">{{ eventName(u.event_id) }}</span>
                 <template v-if="showInternal">
-                  <br /><span class="muted internal-id" title="内部用 ID（16 進数 8 桁。変わりません）">内部 <code>{{ u.id }}</code></span>
-                  <br /><span class="muted internal-id" title="[内部用 8 桁][表示用 8 桁]">{{ u.uid }}</span>
+                  <br /><span class="muted internal-id" title="内部 ID（16 進数 8 桁。変わりません）">内部 <code>{{ u.id }}</code></span>
+                  <br /><span class="muted internal-id" title="[内部 ID 8 桁][イベント ID 4 桁][表示 ID 4 桁]">{{ u.uid }}</span>
                 </template>
               </td>
               <td class="name-cell">
@@ -831,6 +963,9 @@ onMounted(load)
 .user-search input { flex: 1; max-width: 360px; }
 .user-search { flex-wrap: wrap; }
 .user-search .grow { flex: 1; }
+.event-filter { width: auto; max-width: 260px; }
+.import-event { display: grid; gap: 4px; width: 100%; }
+.events-panel { grid-column: 1 / -1; }
 .bulk-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 8%, transparent); position: sticky; top: 0; z-index: 2; }
 .bulk-channels { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding-top: 6px; }
 .danger-fill { background: #dc2626; border-color: #dc2626; color: #fff; }
