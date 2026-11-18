@@ -1,0 +1,129 @@
+# Macross v0.4（9チャンネル・LR受聴・TTS・位置情報）
+#   設定:  /srv/macross/Macross.yaml だけを編集する（ドメイン・IP・録音先など。手順は README.md）
+#          初回はこのフォルダの Macross.yaml（ひな形）をコピーする:
+#            sudo install -D -m 600 Macross.yaml /srv/macross/Macross.yaml
+#   起動:  docker compose up -d --build
+#   設定を変えたら:  docker compose down && docker compose up -d
+#
+# Macross のデータは全部 /srv/macross にまとまっている:
+#   /srv/macross/Macross.yaml   設定ファイル
+#   /srv/macross/data           ユーザ・チャンネル・メール設定
+#   /srv/macross/recordings     録音（MP3）
+#   /srv/macross/voices         追加の読み上げ音声モデル（任意）
+#
+# WebRTC の UDP ポート範囲を扱うため、全サービスを host ネットワークで動かす。
+
+# 設定ファイルの場所を変えるときは .env に MACROSS_YAML=/path/to/Macross.yaml と書く
+x-macross-yaml: &macross_yaml ${MACROSS_YAML:-/srv/macross/Macross.yaml}:/etc/macross/Macross.yaml:ro
+
+services:
+  # Macross.yaml から Janus / Caddy / Grafana の設定を生成して終了する
+  config:
+    build: ./config
+    network_mode: none
+    volumes:
+      - *macross_yaml
+      - generated:/generated
+
+  janus:
+    build: ./janus
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      config:
+        condition: service_completed_successfully
+    volumes:
+      - generated:/generated:ro
+      - /srv/macross/work:/srv/macross/work
+
+  server:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - janus
+    environment:
+      - MACROSS_CONFIG_HOST=${MACROSS_YAML:-/srv/macross/Macross.yaml}   # 管理画面に表示する設定ファイルの場所
+    volumes:
+      - *macross_yaml
+      - /srv/macross/recordings:/srv/macross/recordings
+      - /srv/macross/work:/srv/macross/work
+      - /srv/macross/data:/srv/macross/data
+      - /srv/macross/voices:/srv/macross/voices:ro   # 追加の TTS 音声モデル (.htsvoice)
+
+  # HTTPS 終端とルーティング。server.https が caddy なら Let's Encrypt で証明書を取得、
+  # tunnel なら 127.0.0.1:8081 で Cloudflare Tunnel からの HTTP を受ける
+  caddy:
+    image: caddy:2.8.4
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      config:
+        condition: service_completed_successfully
+    command: ["caddy", "run", "--config", "/generated/Caddyfile", "--adapter", "caddyfile"]
+    volumes:
+      - generated:/generated:ro
+      - caddy_data:/data
+
+  # 録音の閲覧・ダウンロード（https://<ドメイン>/files/、admin のみ）
+  filebrowser:
+    image: filebrowser/filebrowser:v2.31.2
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - --noauth
+      - --address=127.0.0.1
+      - --port=8090
+      - --baseurl=/files
+      - --root=/srv
+      - --database=/database/filebrowser.db
+    volumes:
+      - /srv/macross/recordings:/srv:ro
+      - filebrowser_db:/database
+
+  # ---- 監視（Grafana: https://<ドメイン>/grafana/、admin のみ） ----
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    network_mode: host
+    pid: host
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=127.0.0.1:9100
+    volumes:
+      - /:/host:ro,rslave
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=90d
+      - --web.listen-address=127.0.0.1:9090
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      config:
+        condition: service_completed_successfully
+    environment:
+      - GF_PATHS_CONFIG=/generated/grafana.ini
+    volumes:
+      - generated:/generated:ro
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  generated:
+  caddy_data:
+  filebrowser_db:
+  prometheus_data:
+  grafana_data:

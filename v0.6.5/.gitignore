@@ -1,0 +1,5 @@
+server/target/
+web/node_modules/
+web/dist/
+dev-data/
+__pycache__/

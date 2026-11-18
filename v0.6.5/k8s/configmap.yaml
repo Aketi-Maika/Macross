@@ -1,0 +1,94 @@
+# Macross v0.6.5 の設定（Macross.yaml）。CloudNative Days OSS Showcase 用
+# このファイルは公開リポジトリに置かれ、誰でも読める。パスワード・SMTP のパスワードなどは書かない
+# （0000 のパスワードはハッシュだけを書く。パスワードそのものは管理者だけが持つ）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: macross-config
+data:
+  Macross.yaml: |
+    server:
+      domain: "macross.showcase.cloudnativedays.jp"
+      https: "gateway"              # TLS は Gateway（HTTPRoute）が終端。Caddy は Pod の :8081 で HTTP のみ
+      listen: "127.0.0.1:8080"
+      data_dir: "/srv/macross/data"
+      cookie_secure: true
+      metrics_listen: "127.0.0.1:9180"
+      session_days: 30
+
+    limits:
+      max_connections: 50            # 展示の CPU（Janus は 1.5 コアまで）で確実に動く人数
+
+    channels:
+      room_base: 1001
+      initial:
+        - name: "ch1"
+          max_speakers: 1
+        - name: "ch2"
+          max_speakers: 1
+
+    audio:
+      transport: "websocket"         # 音声も HTTPS の WebSocket で運ぶ（外から UDP が届かない環境）
+      sampling_rate: 16000
+      bitrate: 32000
+
+    recording:
+      dir: "/srv/macross/recordings"
+      work_dir: "/srv/macross/work"
+      retention_days: 1              # 展示では来場者の声を長く残さない（6 時間ごとの掃除で 1 日を過ぎたものを消す）
+      mp3_bitrate: "64k"
+      delete_silent: true
+      silence_threshold_db: -45
+
+    tts:
+      enabled: true
+      voice_dir: "/srv/macross/voices"
+      max_chars: 200
+      cooldown_secs: 3
+
+    janus:
+      url: "http://127.0.0.1:8088/janus"
+      public_ip: ""
+      rtp_port_range: "20000-20200"
+      event_loops: 4
+      ice_servers: []
+
+    superuser:
+      name: "スーパーユーザー"
+      furigana: ""
+      email: ""
+      # 0000 のパスワードの Argon2id ハッシュ（クラスタを作り直しても同じパスワードでログインできる）
+      password_hash: "$argon2id$v=19$m=19456,t=2,p=1$kc6xN+Dv+sx/Ia0VpHgOBQ$fJuo4Py8jCeYL8hmhaxVi/bN3BN7OWT7MC4AfQ0Qni8"
+
+    mail:
+      # 展示の環境では外への通信が 80・443 番だけなので SMTP（587・465）は届かない。
+      # 初期パスワードは管理画面のユーザー一覧で確認できる
+      default_from: "unit_genesis-aerial@macross.build-maika.jp"
+      default_from_name: "Macross"
+      smtp_host: "www2835.sakura.ne.jp"
+      smtp_port: 587
+      smtp_security: "starttls"
+      smtp_username: ""
+      smtp_password: ""
+
+    location:
+      enabled: true                  # 本人がブラウザで許可した場合だけ集める。見られるのは管理者だけ
+      record_interval_secs: 30
+      record_min_move_m: 20
+      retention_days: 1              # 録音と同じく 1 日で消す（6 時間ごとの掃除で、1 件ずつ記録した時刻から数える）
+      reverse_geocode: false         # 座標を外のサービス（国土地理院）に送らない。録音と同じく Pod の外に出さない
+      glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf"
+      base_tiles: "https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png"
+      photo_tiles: "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg"
+      buildings_tilejson: "https://tiles.openfreemap.org/planet"
+      terrain_tiles: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+
+    external_api:
+      enabled: false
+
+    demo:
+      # 接続上限（limits.max_connections）に達していなければ、一般ユーザーはパスワードなしで入室できる
+      # （ログイン画面の「入室する」で ID を自動発行・既存の一般 ID はパスワード空欄でログイン）。
+      # スーパーユーザー（0000）と管理者は常にパスワードが必要
+      open_entry: true
+      max_guests: 1000

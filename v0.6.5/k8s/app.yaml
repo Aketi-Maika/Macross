@@ -1,0 +1,183 @@
+# Macross v0.6.5 を Kubernetes で動かす（CloudNative Days OSS Showcase 用）
+#
+# docker compose 版（host ネットワーク）と同じく、全部のコンテナを 1 つの Pod に入れて 127.0.0.1 でつなぐ。
+#   ブラウザ ─HTTPS─> Gateway ─HTTP─> caddy(:8081) ─> server(127.0.0.1:8080)
+#                                                └─> /files/ → filebrowser、/grafana/ → grafana（admin のみ）
+#   音声も WebSocket（/ws）で運び、server が janus に plain RTP（127.0.0.1）で中継する（UDP の公開は不要）
+#
+# 設定は configmap.yaml の Macross.yaml。データ・録音は PVC（クラスタを作り直すと消える）
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: macross-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: macross
+spec:
+  replicas: 1
+  # PVC は 1 つの Pod だけがつかむので、入れ替えは止めてから起こす
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: macross
+  template:
+    metadata:
+      labels:
+        app: macross
+    spec:
+      initContainers:
+        # Macross.yaml から Janus・Caddy・Grafana の設定と Prometheus・Grafana のファイルを /generated に作る
+        - name: config
+          image: ghcr.io/aketi-maika/macross-config:0.6.5
+          command:
+            - sh
+            - -c
+            - mkdir -p /srv/macross/data /srv/macross/recordings /srv/macross/work /srv/macross/voices && exec python3 /usr/local/bin/render.py /etc/macross/Macross.yaml /generated
+          volumeMounts:
+            - { name: config, mountPath: /etc/macross, readOnly: true }
+            - { name: generated, mountPath: /generated }
+            - { name: data, mountPath: /srv/macross }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi, ephemeral-storage: 64Mi }
+      containers:
+        # Macross 本体（認証・管理・PTT 制御・音声の中継・読み上げ・録音の変換）
+        - name: server
+          image: ghcr.io/aketi-maika/macross-server:0.6.5
+          args: ["macross", "--config", "/etc/macross/Macross.yaml"]
+          env:
+            - name: MACROSS_CONFIG_HOST
+              value: "ConfigMap macross-config（Macross.yaml）"
+          volumeMounts:
+            - { name: config, mountPath: /etc/macross, readOnly: true }
+            - { name: data, mountPath: /srv/macross }
+          resources:
+            requests: { cpu: 300m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi, ephemeral-storage: 256Mi }
+        # 音声のミックス（Janus AudioBridge）
+        - name: janus
+          image: ghcr.io/aketi-maika/macross-janus:0.6.5
+          volumeMounts:
+            - { name: generated, mountPath: /generated, readOnly: true }
+            - { name: data, mountPath: /srv/macross }
+          resources:
+            requests: { cpu: 300m, memory: 128Mi }
+            limits: { cpu: 1500m, memory: 512Mi, ephemeral-storage: 256Mi }
+        # 入口。/files/・/grafana/ は Macross の admin ログインを確かめてから中継する
+        - name: caddy
+          image: caddy:2.8.4
+          command: ["caddy", "run", "--config", "/generated/Caddyfile", "--adapter", "caddyfile"]
+          ports:
+            - containerPort: 8081
+          readinessProbe:
+            httpGet: { path: /api/config, port: 8081 }
+            periodSeconds: 10
+          volumeMounts:
+            - { name: generated, mountPath: /generated, readOnly: true }
+            - { name: caddy, mountPath: /data }
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 300m, memory: 128Mi, ephemeral-storage: 128Mi }
+        # 録音の閲覧（読み取り専用）
+        - name: filebrowser
+          image: filebrowser/filebrowser:v2.31.2
+          args:
+            - --noauth
+            - --address=127.0.0.1
+            - --port=8090
+            - --baseurl=/files
+            - --root=/srv
+            - --database=/database/filebrowser.db
+          volumeMounts:
+            - { name: data, mountPath: /srv, subPath: recordings, readOnly: true }
+            - { name: filebrowser, mountPath: /database }
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi, ephemeral-storage: 128Mi }
+        # 監視
+        - name: prometheus
+          image: prom/prometheus:v2.54.1
+          args:
+            - --config.file=/generated/monitoring/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=7d
+            - --storage.tsdb.retention.size=300MB
+            - --web.listen-address=127.0.0.1:9090
+          volumeMounts:
+            - { name: generated, mountPath: /generated, readOnly: true }
+            - { name: prometheus, mountPath: /prometheus }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 300m, memory: 512Mi, ephemeral-storage: 128Mi }
+        - name: grafana
+          image: grafana/grafana:11.2.0
+          env:
+            - { name: GF_PATHS_CONFIG, value: /generated/grafana.ini }
+            - { name: GF_PATHS_PROVISIONING, value: /generated/monitoring/grafana/provisioning }
+          volumeMounts:
+            - { name: generated, mountPath: /generated, readOnly: true }
+            - { name: grafana, mountPath: /var/lib/grafana }
+            - { name: generated, mountPath: /var/lib/grafana/dashboards, subPath: monitoring/grafana/dashboards, readOnly: true }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 300m, memory: 384Mi, ephemeral-storage: 128Mi }
+        # CPU・メモリ・通信量（ホストはマウントできないので、Pod から見える範囲）
+        - name: node-exporter
+          image: prom/node-exporter:v1.8.2
+          args:
+            - --web.listen-address=127.0.0.1:9100
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 64Mi, ephemeral-storage: 64Mi }
+      volumes:
+        - name: config
+          configMap:
+            name: macross-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: macross-data
+        - name: generated
+          emptyDir: { sizeLimit: 64Mi }
+        - name: caddy
+          emptyDir: { sizeLimit: 64Mi }
+        - name: filebrowser
+          emptyDir: { sizeLimit: 64Mi }
+        - name: prometheus
+          emptyDir: { sizeLimit: 512Mi }
+        - name: grafana
+          emptyDir: { sizeLimit: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: macross
+spec:
+  selector:
+    app: macross
+  ports:
+    - port: 80
+      targetPort: 8081
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: macross
+spec:
+  parentRefs:
+    - name: showcase
+      namespace: gateway
+  hostnames:
+    - macross.showcase.cloudnativedays.jp
+  rules:
+    - backendRefs:
+        - name: macross
+          port: 80
