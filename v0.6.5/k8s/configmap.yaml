@@ -72,11 +72,11 @@ data:
       smtp_password: ""
 
     location:
-      enabled: false                 # 展示では来場者の位置情報を集めない
+      enabled: true                  # 本人がブラウザで許可した場合だけ集める。見られるのは管理者だけ
       record_interval_secs: 30
       record_min_move_m: 20
-      retention_days: 1
-      reverse_geocode: false
+      retention_days: 1              # 録音と同じく 1 日で消す（6 時間ごとの掃除で、1 件ずつ記録した時刻から数える）
+      reverse_geocode: false         # 座標を外のサービス（国土地理院）に送らない。録音と同じく Pod の外に出さない
       glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf"
       base_tiles: "https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png"
       photo_tiles: "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg"

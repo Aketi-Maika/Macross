@@ -5,7 +5,7 @@
 //!
 //! - 位置: 1 人あたり `record_interval_secs` ごと、または `record_min_move_m` 以上動いたときに記録
 //! - PTT・読み上げ: 押した（送った）時点の位置を毎回記録
-//! - `retention_days` を過ぎた日のファイルは 1 日 1 回削除
+//! - `retention_days` を過ぎた記録は、録音と同じく 6 時間ごとに削除（記録した時刻から 1 件ずつ数える）
 
 use crate::config::LocationCfg;
 use crate::radio::{now_jst, Location};
@@ -106,7 +106,8 @@ impl GnssLog {
             loop {
                 if Instant::now() >= next_cleanup {
                     cleanup(&wdir, retention);
-                    next_cleanup = Instant::now() + Duration::from_secs(24 * 3600);
+                    // 録音と同じく 6 時間ごと（保存期間を 1 日にしても、過ぎた記録が長く残らない）
+                    next_cleanup = Instant::now() + Duration::from_secs(6 * 3600);
                 }
                 let first = match rx.recv_timeout(Duration::from_secs(600)) {
                     Ok(p) => p,
@@ -285,22 +286,75 @@ fn thin(points: Vec<Point>, max: usize) -> Vec<Point> {
         .collect()
 }
 
+/// 保存期間を過ぎた位置の記録を消す（録音と同じく、1 件ずつ記録した時刻から数える。v0.6.5）。
+/// 日付ごとのファイルが丸ごと期間を過ぎていれば削除し、途中までなら過ぎた行だけを消して書き直す
 fn cleanup(dir: &Path, retention_days: u32) {
     if retention_days == 0 {
         return;
     }
-    let limit = now_jst().date_naive() - ChronoDuration::days(i64::from(retention_days));
+    cleanup_before(dir, now_jst().timestamp_millis() - i64::from(retention_days) * 86_400_000);
+}
+
+fn cleanup_before(dir: &Path, cutoff_ms: i64) {
+    let jst = FixedOffset::east_opt(9 * 3600).unwrap();
+    let day_start = |d: NaiveDate| {
+        d.and_hms_opt(0, 0, 0).and_then(|t| jst.from_local_datetime(&t).single()).map(|t| t.timestamp_millis())
+    };
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         let Some(d) = name.strip_suffix(".csv").and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()) else { continue };
-        if d < limit {
+        let (Some(start), Some(end)) = (day_start(d), day_start(d + ChronoDuration::days(1))) else { continue };
+        if end <= cutoff_ms {
             match std::fs::remove_file(e.path()) {
                 Ok(()) => tracing::info!("保存期間を過ぎた位置の記録を削除: {name}"),
                 Err(err) => tracing::warn!("{name} を削除できません: {err}"),
             }
+        } else if start < cutoff_ms {
+            match prune(&e.path(), cutoff_ms) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("保存期間を過ぎた位置の記録を削除: {name} から {n} 件"),
+                Err(err) => tracing::warn!("{name} の古い記録を削除できません: {err:#}"),
+            }
         }
     }
+}
+
+/// cutoff_ms より前の行を消して書き直す。消した件数を返す（残りが無ければファイルごと削除）
+fn prune(path: &Path, cutoff_ms: i64) -> anyhow::Result<usize> {
+    let text = std::fs::read_to_string(path)?;
+    let body = text.trim_start_matches('\u{feff}');
+    let mut rdr = csv::ReaderBuilder::new().flexible(true).has_headers(false).from_reader(body.as_bytes());
+    let mut w = csv::WriterBuilder::new().flexible(true).from_writer(vec![]);
+    let (mut kept, mut dropped) = (0usize, 0usize);
+    for (i, rec) in rdr.records().enumerate() {
+        let Ok(r) = rec else { continue };
+        if i == 0 {
+            w.write_record(&r)?; // 見出し
+            continue;
+        }
+        match r.get(1).and_then(|s| s.trim().parse::<i64>().ok()) {
+            Some(ts) if ts < cutoff_ms => dropped += 1,
+            _ => {
+                w.write_record(&r)?;
+                kept += 1;
+            }
+        }
+    }
+    if dropped == 0 {
+        return Ok(0);
+    }
+    if kept == 0 {
+        std::fs::remove_file(path)?;
+        return Ok(dropped);
+    }
+    let mut out = b"\xEF\xBB\xBF".to_vec();
+    out.extend(w.into_inner()?);
+    // 書きかけを読まれないよう、別名で書いてから置き換える
+    let tmp = path.with_extension("csv.tmp");
+    std::fs::write(&tmp, out)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(dropped)
 }
 
 #[cfg(test)]
@@ -347,6 +401,30 @@ mod tests {
         assert_eq!(got[0].name, "山田, 太郎");
         assert_eq!(got[0].kind, Kind::Ptt);
         assert_eq!(got[0].location.accuracy, Some(8.0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cleanup_removes_only_expired_rows() {
+        let dir = std::env::temp_dir().join(format!("mx-gnss-clean-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let loc = Location { lat: 35.68, lon: 139.76, alt: None, accuracy: None, ts: 0 };
+        let mut old = Point::new("0001", "古い", Kind::Pos, "", loc.clone());
+        let mut new = Point::new("0002", "新しい", Kind::Ptt, "ch1", loc);
+        old.ts = 1_000;
+        new.ts = 5_000;
+        new.time = old.time.clone(); // 同じ日のファイルに入れる
+        append(&dir, &[old, new]).unwrap();
+        // ファイルの日付の途中を境にする（行ごとに消える）
+        let day = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+        assert_eq!(prune(&day, 3_000).unwrap(), 1);
+        let log = GnssLog { dir: dir.clone(), tx: None };
+        let got = log.read_since(0);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "新しい");
+        // 全部が期間を過ぎたらファイルごと消える
+        assert_eq!(prune(&day, 10_000).unwrap(), 1);
+        assert!(!day.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
