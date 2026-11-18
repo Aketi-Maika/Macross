@@ -17,7 +17,7 @@ data:
       session_days: 30
 
     limits:
-      max_connections: 100
+      max_connections: 50            # 展示の CPU（Janus は 1.5 コアまで）で確実に動く人数
 
     channels:
       room_base: 1001
@@ -35,7 +35,7 @@ data:
     recording:
       dir: "/srv/macross/recordings"
       work_dir: "/srv/macross/work"
-      retention_days: 90
+      retention_days: 1              # 展示では来場者の声を長く残さない（6 時間ごとの掃除で 1 日を過ぎたものを消す）
       mp3_bitrate: "64k"
       delete_silent: true
       silence_threshold_db: -45
@@ -72,11 +72,11 @@ data:
       smtp_password: ""
 
     location:
-      enabled: true
+      enabled: false                 # 展示では来場者の位置情報を集めない
       record_interval_secs: 30
       record_min_move_m: 20
-      retention_days: 90
-      reverse_geocode: true
+      retention_days: 1
+      reverse_geocode: false
       glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf"
       base_tiles: "https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png"
       photo_tiles: "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg"
